@@ -4,11 +4,11 @@
 //
 // The two main abstractions are:
 //
-//   - DB[T]: a single SQLite database whose per-transaction accessor is T.
+//   - DB[Queries]: a single SQLite database whose per-transaction accessor is Queries.
 //     Use GetDB or OpenDB to open an existing file, or TestDB for an
 //     in-memory database in tests.
 //
-//   - Pool[T]: a per-key connection pool where each key (e.g. a user ID) maps
+//   - Pool[Queries]: a per-key connection pool where each key (e.g. a user ID) maps
 //     to its own SQLite file on disk. Connections are cached in a ristretto
 //     TinyLFU cache and closed gracefully when evicted. Use NewPool to create
 //     one, or TestPool in tests.
@@ -52,9 +52,9 @@ type Evicter interface {
 	Evict(userID string)
 }
 
-// Queries is a function that builds a per-transaction accessor of type T from
+// Querier is a function that builds a per-transaction accessor of type Queries from
 // a DBTX. It is called once per transaction inside Read and Write.
-type Queries[T any] func(tx DBTX) *T
+type Querier[Queries any] func(tx DBTX) *Queries
 
 // DBTX is the interface satisfied by both *sql.DB and *sql.Tx, allowing the
 // same accessor type to be used within or outside a transaction.
@@ -66,7 +66,7 @@ type DBTX interface {
 }
 
 // DB is a generic SQLite database handle parameterised by a per-transaction
-// accessor type T. It maintains two underlying sql.DB connections:
+// accessor type Queries. It maintains two underlying sql.DB connections:
 //
 //   - wrdb: a single write connection (MaxOpenConns=1) with _txlock=immediate,
 //     serialised by a mutex so that only one writer can hold the SQLite WAL
@@ -77,8 +77,8 @@ type DBTX interface {
 // Every operation runs inside a transaction. Write calls retry on transient
 // SQLite busy errors using exponential backoff; Read calls retry indefinitely
 // until the context is cancelled.
-type DB[T any] struct {
-	factory        Queries[T]
+type DB[Queries any] struct {
+	factory        Querier[Queries]
 	rddb           *sql.DB
 	backoffRetries int
 
@@ -88,7 +88,7 @@ type DB[T any] struct {
 
 // TestDB creates an in-memory SQLite database, runs migrations, and returns a
 // DB ready for use in tests. Panics on any error so test setup stays concise.
-func TestDB[T any](migrations embed.FS, ctor Queries[T]) *DB[T] {
+func TestDB[Queries any](migrations embed.FS, ctor Querier[Queries]) *DB[Queries] {
 	db, err := sql.Open("sqlite3", fmt.Sprintf(writeDSN, ":memory:"))
 	if err != nil {
 		panic(err)
@@ -100,13 +100,13 @@ func TestDB[T any](migrations embed.FS, ctor Queries[T]) *DB[T] {
 		panic(err)
 	}
 
-	return &DB[T]{factory: ctor, rddb: db, mu: &sync.Mutex{}, wrdb: db, backoffRetries: 1}
+	return &DB[Queries]{factory: ctor, rddb: db, mu: &sync.Mutex{}, wrdb: db, backoffRetries: 1}
 }
 
 // GetDB opens (or creates) the SQLite database at dbName, runs all pending
 // migrations, and returns an open DB. Pass a non-nil key to use SQLCipher
 // encryption; pass nil for an unencrypted database.
-func GetDB[T any](dbName string, migrations embed.FS, ctor Queries[T], key []byte) (*DB[T], error) {
+func GetDB[Queries any](dbName string, migrations embed.FS, ctor Querier[Queries], key []byte) (*DB[Queries], error) {
 	if err := os.MkdirAll(filepath.Dir(dbName), 0o755); err != nil {
 		return nil, fmt.Errorf("creating db dir: %w", err)
 	}
@@ -137,7 +137,7 @@ func GetDB[T any](dbName string, migrations embed.FS, ctor Queries[T], key []byt
 // does not exist yet, it falls back to GetDB (which creates and migrates it).
 // Use this on the hot path when migrations have already been applied (e.g.
 // via MigrateAll at startup).
-func OpenDB[T any](dbName string, migrations embed.FS, ctor Queries[T], key []byte) (*DB[T], error) {
+func OpenDB[Queries any](dbName string, migrations embed.FS, ctor Querier[Queries], key []byte) (*DB[Queries], error) {
 	if _, err := os.Stat(dbName); err != nil {
 		// File doesn't exist — new DB, must create and migrate.
 		return GetDB(dbName, migrations, ctor, key)
@@ -149,20 +149,20 @@ func OpenDB[T any](dbName string, migrations embed.FS, ctor Queries[T], key []by
 // RDBMS returns the underlying write *sql.DB. Use this only when direct
 // database access is needed outside the Read/Write transaction helpers (e.g.
 // for PRAGMA statements or schema inspection).
-func (db *DB[T]) RDBMS() *sql.DB {
+func (db *DB[Queries]) RDBMS() *sql.DB {
 	return db.wrdb
 }
 
 // Close closes both the read and write database connections. It waits for any
 // in-flight operations to complete before returning.
-func (db *DB[T]) Close() error {
+func (db *DB[Queries]) Close() error {
 	return errors.Join(db.rddb.Close(), db.wrdb.Close())
 }
 
 // Checkpoint runs PRAGMA wal_checkpoint(TRUNCATE) under the write mutex.
 // WAL frames are moved into the main database file and, if all readers are
 // done, the WAL file is reset to zero size.
-func (db *DB[T]) Checkpoint(ctx context.Context) error {
+func (db *DB[Queries]) Checkpoint(ctx context.Context) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -174,7 +174,7 @@ func (db *DB[T]) Checkpoint(ctx context.Context) error {
 // Read executes f inside a read-only deferred transaction. It retries on
 // transient SQLite busy errors using exponential backoff until ctx is
 // cancelled. Errors returned by f are treated as permanent and not retried.
-func (db *DB[T]) Read(ctx context.Context, f func(*T) error) error {
+func (db *DB[Queries]) Read(ctx context.Context, f func(*Queries) error) error {
 	return backoff.Retry(func() error {
 		return db.transaction(ctx, db.rddb, f)
 	}, backoff.WithContext(backoff.NewExponentialBackOff(), ctx))
@@ -184,7 +184,7 @@ func (db *DB[T]) Read(ctx context.Context, f func(*T) error) error {
 // mutex. It retries on transient SQLite busy errors up to backoffRetries times
 // with exponential backoff. Errors returned by f are treated as permanent and
 // cause an immediate rollback with no retry.
-func (db *DB[T]) Write(ctx context.Context, f func(*T) error) error {
+func (db *DB[Queries]) Write(ctx context.Context, f func(*Queries) error) error {
 	var err error
 
 	b := backoff.WithContext(backoff.NewExponentialBackOff(), ctx)
@@ -232,13 +232,13 @@ var ErrKeyNotAvailable = errors.New("data key not available")
 // eviction. Each key (e.g. user ID) gets its own SQLite database file under
 // dir. When the cache evicts an entry, its DB is closed only after all
 // in-flight operations finish (reference-counted via poolEntry).
-type Pool[T any] struct {
+type Pool[Queries any] struct {
 	dir        string
 	migrations embed.FS
-	factory    Queries[T]
+	factory    Querier[Queries]
 
 	mu          sync.Mutex // serializes DB creation
-	cache       *ristretto.Cache[string, *poolEntry[T]]
+	cache       *ristretto.Cache[string, *poolEntry[Queries]]
 	keyProvider func(userID string) ([]byte, bool)
 
 	inactivityTimeout time.Duration
@@ -247,21 +247,21 @@ type Pool[T any] struct {
 
 // SetKeyProvider wires the data key lookup function into the pool. Must be
 // called before any Read/Write on the pool.
-func (p *Pool[T]) SetKeyProvider(fn func(string) ([]byte, bool)) {
+func (p *Pool[Queries]) SetKeyProvider(fn func(string) ([]byte, bool)) {
 	p.keyProvider = fn
 }
 
 // Evict immediately removes the pool entry for userID from the cache, closing
 // the database once all in-flight operations finish. No-op if the entry is not
 // cached.
-func (p *Pool[T]) Evict(userID string) {
+func (p *Pool[Queries]) Evict(userID string) {
 	p.cache.Del(userID)
 }
 
 // Wait blocks until all pending cache evictions have been processed. Call this
 // after Evict to ensure the evicted entry's resources (including any lock file)
 // have been fully released before attempting to acquire an exclusive lock.
-func (p *Pool[T]) Wait() {
+func (p *Pool[Queries]) Wait() {
 	p.cache.Wait()
 }
 
@@ -272,11 +272,11 @@ func (p *Pool[T]) Wait() {
 // It ensures the directory exists and migrates all existing databases.
 // keyProvider, if non-nil, is set on the pool before MigrateAll runs so that
 // encrypted pools skip migration (per-DB migration is lazy in getOrCreate).
-func NewPool[T any](
-	dir string, migrations embed.FS, ctor Queries[T], maxCached int64,
+func NewPool[Queries any](
+	dir string, migrations embed.FS, ctor Querier[Queries], maxCached int64,
 	keyProvider func(string) ([]byte, bool),
 	inactivityTimeout time.Duration,
-) (*Pool[T], error) {
+) (*Pool[Queries], error) {
 	maxCached = max(maxCached, 1000)
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -285,7 +285,7 @@ func NewPool[T any](
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	p := &Pool[T]{
+	p := &Pool[Queries]{
 		dir:               dir,
 		migrations:        migrations,
 		factory:           ctor,
@@ -294,7 +294,7 @@ func NewPool[T any](
 		reapCancel:        cancel,
 	}
 
-	cache, err := newPoolCache[T](maxCached)
+	cache, err := newPoolCache[Queries](maxCached)
 	if err != nil {
 		cancel()
 
@@ -318,7 +318,7 @@ func NewPool[T any](
 
 // TestPool returns a pool backed by dir for tests. Panics on error, matching
 // the TestDB convention.
-func TestPool[T any](dir string, migrations embed.FS, ctor Queries[T]) *Pool[T] {
+func TestPool[Queries any](dir string, migrations embed.FS, ctor Querier[Queries]) *Pool[Queries] {
 	p, err := NewPool(dir, migrations, ctor, 100_000, nil, 0)
 	if err != nil {
 		panic(fmt.Sprintf("creating test pool: %v", err))
@@ -330,7 +330,7 @@ func TestPool[T any](dir string, migrations embed.FS, ctor Queries[T]) *Pool[T] 
 // Read acquires the database for key and executes f inside a read-only
 // deferred transaction. The pool entry's reference count is held for the
 // duration so the database is not closed while f is running.
-func (p *Pool[T]) Read(ctx context.Context, key string, f func(*T) error) error {
+func (p *Pool[Queries]) Read(ctx context.Context, key string, f func(*Queries) error) error {
 	entry, err := p.acquire(key)
 	if err != nil {
 		return err
@@ -343,7 +343,7 @@ func (p *Pool[T]) Read(ctx context.Context, key string, f func(*T) error) error 
 // Write acquires the database for key and executes f inside an immediate
 // (exclusive) transaction. The pool entry's reference count is held for the
 // duration so the database is not closed while f is running.
-func (p *Pool[T]) Write(ctx context.Context, key string, f func(*T) error) error {
+func (p *Pool[Queries]) Write(ctx context.Context, key string, f func(*Queries) error) error {
 	entry, err := p.acquire(key)
 	if err != nil {
 		return err
@@ -356,7 +356,7 @@ func (p *Pool[T]) Write(ctx context.Context, key string, f func(*T) error) error
 // MigrateAll opens every *.db file under dir, runs migrations, and closes.
 // If a keyProvider is configured, migration is skipped (lazy per-DB migration
 // happens in getOrCreate when the data key is available).
-func (p *Pool[T]) MigrateAll() error {
+func (p *Pool[Queries]) MigrateAll() error {
 	if p.keyProvider != nil {
 		return nil
 	}
@@ -384,7 +384,7 @@ func (p *Pool[T]) MigrateAll() error {
 
 // ListKeys returns the key (user ID) for every database file in the pool
 // directory. The returned slice is sorted by filesystem order.
-func (p *Pool[T]) ListKeys() ([]string, error) {
+func (p *Pool[Queries]) ListKeys() ([]string, error) {
 	matches, err := filepath.Glob(filepath.Join(p.dir, "*.db"))
 	if err != nil {
 		return nil, fmt.Errorf("listing pool keys: %w", err)
@@ -402,12 +402,12 @@ func (p *Pool[T]) ListKeys() ([]string, error) {
 // Close stops the inactivity reaper and closes all cached databases.
 // sql.DB.Close waits for in-flight operations to finish, so this blocks until
 // everything drains.
-func (p *Pool[T]) Close() error {
+func (p *Pool[Queries]) Close() error {
 	p.reapCancel()
 
 	var errs []error
 
-	p.cache.IterValues(func(entry *poolEntry[T]) (stop bool) {
+	p.cache.IterValues(func(entry *poolEntry[Queries]) (stop bool) {
 		entry.closing.Store(true)
 		entry.once.Do(func() {
 			if err := entry.db.Close(); err != nil {
@@ -425,7 +425,7 @@ func (p *Pool[T]) Close() error {
 	return errors.Join(errs...)
 }
 
-func openDBConns[T any](dbName string, ctor Queries[T], key []byte) (*DB[T], error) {
+func openDBConns[Queries any](dbName string, ctor Querier[Queries], key []byte) (*DB[Queries], error) {
 	var rDSN, wDSN string
 
 	if len(key) > 0 {
@@ -449,12 +449,12 @@ func openDBConns[T any](dbName string, ctor Queries[T], key []byte) (*DB[T], err
 		return nil, err
 	}
 
-	return &DB[T]{factory: ctor, rddb: rddb, mu: &sync.Mutex{}, wrdb: wrdb, backoffRetries: 5}, nil
+	return &DB[Queries]{factory: ctor, rddb: rddb, mu: &sync.Mutex{}, wrdb: wrdb, backoffRetries: 5}, nil
 }
 
 // runInactivityReaper periodically evicts pool entries that have been idle
 // longer than p.inactivityTimeout. Stops when ctx is cancelled.
-func (p *Pool[T]) runInactivityReaper(ctx context.Context) {
+func (p *Pool[Queries]) runInactivityReaper(ctx context.Context) {
 	interval := max(p.inactivityTimeout/4, time.Second)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -469,13 +469,13 @@ func (p *Pool[T]) runInactivityReaper(ctx context.Context) {
 	}
 }
 
-func (p *Pool[T]) reapInactive() {
+func (p *Pool[Queries]) reapInactive() {
 	cutoff := time.Now().Add(-p.inactivityTimeout).UnixNano()
 
 	// Collect keys first; calling Del inside IterValues would deadlock because
 	// IterValues holds a read lock and Del needs a write lock on the same shard.
 	var toEvict []string
-	p.cache.IterValues(func(entry *poolEntry[T]) (stop bool) {
+	p.cache.IterValues(func(entry *poolEntry[Queries]) (stop bool) {
 		if entry.refs.Load() == 0 && entry.lastActivity.Load() < cutoff {
 			toEvict = append(toEvict, entry.key)
 		}
@@ -490,7 +490,7 @@ func (p *Pool[T]) reapInactive() {
 // acquire returns a poolEntry with an incremented ref count. The caller must
 // call release when done. If the entry is being evicted, acquire retries with
 // a fresh entry.
-func (p *Pool[T]) acquire(key string) (*poolEntry[T], error) {
+func (p *Pool[Queries]) acquire(key string) (*poolEntry[Queries], error) {
 	for {
 		entry, err := p.getOrCreate(key)
 		if err != nil {
@@ -505,7 +505,7 @@ func (p *Pool[T]) acquire(key string) (*poolEntry[T], error) {
 	}
 }
 
-func (p *Pool[T]) getOrCreate(key string) (*poolEntry[T], error) {
+func (p *Pool[Queries]) getOrCreate(key string) (*poolEntry[Queries], error) {
 	if entry, ok := p.cache.Get(key); ok {
 		return entry, nil
 	}
@@ -545,7 +545,7 @@ func (p *Pool[T]) getOrCreate(key string) (*poolEntry[T], error) {
 		lockFile = lf
 	}
 
-	entry := &poolEntry[T]{
+	entry := &poolEntry[Queries]{
 		key:      key,
 		db:       newDB,
 		lockFile: lockFile,
@@ -559,9 +559,9 @@ func (p *Pool[T]) getOrCreate(key string) (*poolEntry[T], error) {
 
 // poolEntry wraps a DB with reference counting so that evicted databases are
 // not closed while goroutines are still using them.
-type poolEntry[T any] struct {
+type poolEntry[Queries any] struct {
 	key          string
-	db           *DB[T]
+	db           *DB[Queries]
 	lockFile     *os.File
 	lastActivity atomic.Int64 // unix nanoseconds; updated on every acquire
 	refs         atomic.Int32
@@ -571,7 +571,7 @@ type poolEntry[T any] struct {
 
 // acquire increments the reference count. Returns false if the entry is being
 // evicted, in which case the caller should obtain a fresh entry.
-func (e *poolEntry[T]) acquire() bool {
+func (e *poolEntry[Queries]) acquire() bool {
 	e.refs.Add(1)
 	if e.closing.Load() {
 		e.release()
@@ -584,7 +584,7 @@ func (e *poolEntry[T]) acquire() bool {
 
 // release decrements the reference count. If the entry has been evicted and
 // this is the last reference, it closes the database.
-func (e *poolEntry[T]) release() {
+func (e *poolEntry[Queries]) release() {
 	if e.refs.Add(-1) == 0 && e.closing.Load() {
 		e.once.Do(func() {
 			e.db.Close()
@@ -597,7 +597,7 @@ func (e *poolEntry[T]) release() {
 
 // evict marks the entry for closure. If no references are held, the database
 // is closed immediately; otherwise the last release handles it.
-func (e *poolEntry[T]) evict() {
+func (e *poolEntry[Queries]) evict() {
 	e.closing.Store(true)
 	if e.refs.Load() == 0 {
 		e.once.Do(func() {
@@ -609,12 +609,12 @@ func (e *poolEntry[T]) evict() {
 	}
 }
 
-func newPoolCache[T any](maxCached int64) (*ristretto.Cache[string, *poolEntry[T]], error) {
-	return ristretto.NewCache(&ristretto.Config[string, *poolEntry[T]]{
+func newPoolCache[Queries any](maxCached int64) (*ristretto.Cache[string, *poolEntry[Queries]], error) {
+	return ristretto.NewCache(&ristretto.Config[string, *poolEntry[Queries]]{
 		NumCounters: maxCached * 10,
 		MaxCost:     maxCached,
 		BufferItems: 64,
-		OnExit: func(entry *poolEntry[T]) {
+		OnExit: func(entry *poolEntry[Queries]) {
 			if entry != nil {
 				entry.evict()
 			}
@@ -653,7 +653,7 @@ func migrate(db *sql.DB, migrations embed.FS) error {
 	return goose.Up(db, "migrations")
 }
 
-func (db *DB[T]) transaction(ctx context.Context, rdbms *sql.DB, f func(*T) error) error {
+func (db *DB[Queries]) transaction(ctx context.Context, rdbms *sql.DB, f func(*Queries) error) error {
 	tx, err := rdbms.BeginTx(ctx, nil)
 	if err != nil {
 		// SQLITE_NOTADB ("file is not a database") means the cipher key is
