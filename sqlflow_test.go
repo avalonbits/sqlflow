@@ -35,7 +35,7 @@ func dirFS() fs.FS {
 	return os.DirFS("testdata/migrations")
 }
 
-// kvQuerier is a stand-in for sqlc-generated code.
+// kvQuerier is a minimal query accessor used across tests.
 type kvQuerier struct {
 	db sqlflow.DBTX
 }
