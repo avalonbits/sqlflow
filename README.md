@@ -108,7 +108,10 @@ var querier sqlflow.Querier[Queries] = New
 
 ### Migrations
 
-Pass an `fs.FS` whose **root** contains the goose `*.sql` migration files.
+sqlflow uses [goose](https://github.com/pressly/goose) for migrations. Every
+open function (`GetDB`, `NewPool`, …) runs all pending migrations automatically
+before returning. Migrations are supplied as an `fs.FS` whose root contains the
+`*.sql` files directly — no subdirectory.
 
 ```go
 // Embedded at compile time — sub-root so the FS root IS the migrations dir.
