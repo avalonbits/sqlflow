@@ -10,11 +10,11 @@ At-rest encryption is supported via SQLCipher.
 - [Installation](#installation)
 - [Encryption](#encryption)
 - [Concepts](#concepts)
+  - [Read and Write](#read-and-write)
   - [Querier](#querier)
   - [Migrations](#migrations)
   - [Single database — DB\[Q\]](#single-database--dbq)
   - [Per-key connection pool — Pool\[Q\]](#per-key-connection-pool--poolq)
-  - [Read and Write](#read-and-write)
   - [Testing](#testing)
 - [Examples](#examples)
   - [1. Single database — plain](#1-single-database--plain)
@@ -50,6 +50,44 @@ Then use `GetEncryptedDB` / `OpenEncryptedDB` (single database) or pass a
 passes it to the driver via DSN parameters at open time.
 
 ## Concepts
+
+### Read and Write
+
+`Read` and `Write` are the core of sqlflow. Every database interaction goes
+through one of them — there is no way to obtain a raw connection or run a
+query outside a managed transaction. This is deliberate: the API makes
+correct transaction handling the only path forward.
+
+```go
+// DB
+func (db *DB[Q])  Read (ctx context.Context,             f func(*Q) error) error
+func (db *DB[Q])  Write(ctx context.Context,             f func(*Q) error) error
+
+// Pool
+func (p *Pool[Q]) Read (ctx context.Context, key string, f func(*Q) error) error
+func (p *Pool[Q]) Write(ctx context.Context, key string, f func(*Q) error) error
+```
+
+Both methods accept a closure `f` that receives a `*Q` — your typed query
+accessor — already bound to an open transaction. You call your query methods
+on it; sqlflow commits on success or rolls back on any error, automatically,
+with no extra code on your part. You cannot accidentally run a query outside a
+transaction, mix transactional and non-transactional calls, or forget to commit.
+
+**Read** opens a deferred (read-only) transaction on a shared connection pool,
+so multiple goroutines may call it concurrently without blocking each other.
+Transient busy errors are retried with exponential backoff until `ctx` is
+cancelled.
+
+**Write** opens an immediate (exclusive) transaction on the single write
+connection, serialised by an internal mutex so only one writer runs at a time
+per database. Transient busy errors are retried up to five times with
+exponential backoff. Errors returned by `f` are treated as permanent: the
+transaction rolls back immediately with no retry, and the original error is
+returned to the caller unchanged.
+
+For `Pool`, the `key` argument (e.g. a user ID) selects which database to
+operate on; everything else is identical.
 
 ### Querier
 
@@ -102,34 +140,6 @@ databases are closed only after all in-flight operations finish.
 
 Supply a `keyProvider` function to enable per-key encryption. If the key for a
 given user is unavailable, `Read`/`Write` return `sqlflow.ErrKeyNotAvailable`.
-
-### Read and Write
-
-Both `DB[Q]` and `Pool[Q]` expose the same `Read`/`Write` API. The only
-difference for `Pool` is the additional `key` argument that selects which
-database to operate on.
-
-```go
-// DB
-func (db *DB[Q])   Read (ctx context.Context,              f func(*Q) error) error
-func (db *DB[Q])   Write(ctx context.Context,              f func(*Q) error) error
-
-// Pool
-func (p *Pool[Q])  Read (ctx context.Context, key string,  f func(*Q) error) error
-func (p *Pool[Q])  Write(ctx context.Context, key string,  f func(*Q) error) error
-```
-
-`Read` opens a deferred (read-only) transaction and passes a `*Q` bound to it
-into `f`. Multiple goroutines may call `Read` concurrently. Transient busy
-errors are retried with exponential backoff until `ctx` is cancelled.
-
-`Write` opens an immediate (exclusive) transaction under an internal mutex so
-only one writer runs at a time per database. It retries transient busy errors
-up to five times with exponential backoff. Errors returned by `f` are treated
-as permanent: the transaction is rolled back immediately with no retry.
-
-In both cases the transaction is committed only when `f` returns `nil`; any
-error from `f` triggers a rollback and is returned to the caller as-is.
 
 ### Testing
 
