@@ -33,30 +33,6 @@ import (
 	"github.com/avalonbits/sqlflow"
 )
 
-var migrations = fstest.MapFS{
-	"001_init.sql": {Data: []byte(`-- +goose Up
-CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, val TEXT NOT NULL);
--- +goose Down
-DROP TABLE kv;`)},
-}
-
-type kvStore struct{ db sqlflow.DBTX }
-
-func newKV(db sqlflow.DBTX) *kvStore { return &kvStore{db: db} }
-
-func (s *kvStore) Set(ctx context.Context, key, val string) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO kv(key,val) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET val=excluded.val`,
-		key, val)
-	return err
-}
-
-func (s *kvStore) Get(ctx context.Context, key string) (string, error) {
-	var val string
-	err := s.db.QueryRowContext(ctx, `SELECT val FROM kv WHERE key=?`, key).Scan(&val)
-	return val, err
-}
-
 func main() {
 	path := "/tmp/plain.db"
 	os.Remove(path)
@@ -86,26 +62,6 @@ func main() {
 
 	fmt.Println(val) // world
 }
-```
-
-### 2. Single database — encrypted
-
-```go
-package main
-
-import (
-	"context"
-	"crypto/rand"
-	"fmt"
-	"log"
-	"os"
-	"testing/fstest"
-
-	"github.com/avalonbits/sqlflow"
-)
-
-// go.mod must contain:
-// replace github.com/mattn/go-sqlite3 => github.com/jgiannuzzi/go-sqlite3 v1.14.35-0.20260227142656-2c447b9a2806
 
 var migrations = fstest.MapFS{
 	"001_init.sql": {Data: []byte(`-- +goose Up
@@ -130,6 +86,26 @@ func (s *kvStore) Get(ctx context.Context, key string) (string, error) {
 	err := s.db.QueryRowContext(ctx, `SELECT val FROM kv WHERE key=?`, key).Scan(&val)
 	return val, err
 }
+```
+
+### 2. Single database — encrypted
+
+```go
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"fmt"
+	"log"
+	"os"
+	"testing/fstest"
+
+	"github.com/avalonbits/sqlflow"
+)
+
+// go.mod must contain:
+// replace github.com/mattn/go-sqlite3 => github.com/jgiannuzzi/go-sqlite3 v1.14.35-0.20260227142656-2c447b9a2806
 
 func main() {
 	path := "/tmp/encrypted.db"
@@ -165,23 +141,6 @@ func main() {
 
 	fmt.Println(val) // value
 }
-```
-
-### 3. Connection pool — plain
-
-```go
-package main
-
-import (
-	"context"
-	"fmt"
-	"log"
-	"os"
-	"testing/fstest"
-	"time"
-
-	"github.com/avalonbits/sqlflow"
-)
 
 var migrations = fstest.MapFS{
 	"001_init.sql": {Data: []byte(`-- +goose Up
@@ -206,6 +165,23 @@ func (s *kvStore) Get(ctx context.Context, key string) (string, error) {
 	err := s.db.QueryRowContext(ctx, `SELECT val FROM kv WHERE key=?`, key).Scan(&val)
 	return val, err
 }
+```
+
+### 3. Connection pool — plain
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"testing/fstest"
+	"time"
+
+	"github.com/avalonbits/sqlflow"
+)
 
 func main() {
 	dir := "/tmp/pool-plain"
@@ -253,28 +229,6 @@ func main() {
 	// bob   → hello bob
 	// carol → hello carol
 }
-```
-
-### 4. Connection pool — encrypted
-
-```go
-package main
-
-import (
-	"context"
-	"crypto/rand"
-	"fmt"
-	"log"
-	"os"
-	"sync"
-	"testing/fstest"
-	"time"
-
-	"github.com/avalonbits/sqlflow"
-)
-
-// go.mod must contain:
-// replace github.com/mattn/go-sqlite3 => github.com/jgiannuzzi/go-sqlite3 v1.14.35-0.20260227142656-2c447b9a2806
 
 var migrations = fstest.MapFS{
 	"001_init.sql": {Data: []byte(`-- +goose Up
@@ -299,25 +253,28 @@ func (s *kvStore) Get(ctx context.Context, key string) (string, error) {
 	err := s.db.QueryRowContext(ctx, `SELECT val FROM kv WHERE key=?`, key).Scan(&val)
 	return val, err
 }
+```
 
-// keyStore simulates a session store that holds per-user encryption keys.
-type keyStore struct {
-	mu   sync.Mutex
-	keys map[string][]byte
-}
+### 4. Connection pool — encrypted
 
-func (ks *keyStore) Set(userID string, key []byte) {
-	ks.mu.Lock()
-	defer ks.mu.Unlock()
-	ks.keys[userID] = key
-}
+```go
+package main
 
-func (ks *keyStore) Get(userID string) ([]byte, bool) {
-	ks.mu.Lock()
-	defer ks.mu.Unlock()
-	k, ok := ks.keys[userID]
-	return k, ok
-}
+import (
+	"context"
+	"crypto/rand"
+	"fmt"
+	"log"
+	"os"
+	"sync"
+	"testing/fstest"
+	"time"
+
+	"github.com/avalonbits/sqlflow"
+)
+
+// go.mod must contain:
+// replace github.com/mattn/go-sqlite3 => github.com/jgiannuzzi/go-sqlite3 v1.14.35-0.20260227142656-2c447b9a2806
 
 func main() {
 	dir := "/tmp/pool-encrypted"
@@ -374,6 +331,49 @@ func main() {
 	// alice → data for alice
 	// bob   → data for bob
 	// carol → data for carol
+}
+
+var migrations = fstest.MapFS{
+	"001_init.sql": {Data: []byte(`-- +goose Up
+CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, val TEXT NOT NULL);
+-- +goose Down
+DROP TABLE kv;`)},
+}
+
+type kvStore struct{ db sqlflow.DBTX }
+
+func newKV(db sqlflow.DBTX) *kvStore { return &kvStore{db: db} }
+
+func (s *kvStore) Set(ctx context.Context, key, val string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO kv(key,val) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET val=excluded.val`,
+		key, val)
+	return err
+}
+
+func (s *kvStore) Get(ctx context.Context, key string) (string, error) {
+	var val string
+	err := s.db.QueryRowContext(ctx, `SELECT val FROM kv WHERE key=?`, key).Scan(&val)
+	return val, err
+}
+
+// keyStore simulates a session store that holds per-user encryption keys.
+type keyStore struct {
+	mu   sync.Mutex
+	keys map[string][]byte
+}
+
+func (ks *keyStore) Set(userID string, key []byte) {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	ks.keys[userID] = key
+}
+
+func (ks *keyStore) Get(userID string) ([]byte, bool) {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	k, ok := ks.keys[userID]
+	return k, ok
 }
 ```
 
