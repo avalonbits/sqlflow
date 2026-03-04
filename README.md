@@ -14,6 +14,7 @@ At-rest encryption is supported via SQLCipher.
   - [Migrations](#migrations)
   - [Single database — DB\[Q\]](#single-database--dbq)
   - [Per-key connection pool — Pool\[Q\]](#per-key-connection-pool--poolq)
+  - [Read and Write](#read-and-write)
   - [Testing](#testing)
 - [Examples](#examples)
   - [1. Single database — plain](#1-single-database--plain)
@@ -93,11 +94,6 @@ DROP TABLE ...`)},
 migrations, then opens separate read and write connections in WAL mode.
 Use `OpenDB` on the hot path to skip migrations when the file already exists.
 
-`Read` executes its callback inside a deferred read transaction; multiple
-goroutines may call it concurrently. `Write` executes inside an immediate
-(exclusive) transaction serialised by an internal mutex, with exponential-backoff
-retries on transient busy errors.
-
 ### Per-key connection pool — `Pool[Q]`
 
 `Pool` manages a collection of SQLite databases — one per key (e.g. one per
@@ -106,6 +102,34 @@ databases are closed only after all in-flight operations finish.
 
 Supply a `keyProvider` function to enable per-key encryption. If the key for a
 given user is unavailable, `Read`/`Write` return `sqlflow.ErrKeyNotAvailable`.
+
+### Read and Write
+
+Both `DB[Q]` and `Pool[Q]` expose the same `Read`/`Write` API. The only
+difference for `Pool` is the additional `key` argument that selects which
+database to operate on.
+
+```go
+// DB
+func (db *DB[Q])   Read (ctx context.Context,              f func(*Q) error) error
+func (db *DB[Q])   Write(ctx context.Context,              f func(*Q) error) error
+
+// Pool
+func (p *Pool[Q])  Read (ctx context.Context, key string,  f func(*Q) error) error
+func (p *Pool[Q])  Write(ctx context.Context, key string,  f func(*Q) error) error
+```
+
+`Read` opens a deferred (read-only) transaction and passes a `*Q` bound to it
+into `f`. Multiple goroutines may call `Read` concurrently. Transient busy
+errors are retried with exponential backoff until `ctx` is cancelled.
+
+`Write` opens an immediate (exclusive) transaction under an internal mutex so
+only one writer runs at a time per database. It retries transient busy errors
+up to five times with exponential backoff. Errors returned by `f` are treated
+as permanent: the transaction is rolled back immediately with no retry.
+
+In both cases the transaction is committed only when `f` returns `nil`; any
+error from `f` triggers a rollback and is returned to the caller as-is.
 
 ### Testing
 
