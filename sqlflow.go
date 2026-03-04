@@ -13,9 +13,9 @@
 //     TinyLFU cache and closed gracefully when evicted. Use NewPool to create
 //     one, or TestPool in tests.
 //
-// Both types support optional SQLCipher encryption: pass a non-nil key to
-// GetDB/OpenDB/NewPool and the jgiannuzzi/go-sqlite3 fork will apply
-// PRAGMA key before opening the database.
+// Both types have encrypted variants: use GetEncryptedDB/OpenEncryptedDB and
+// NewEncryptedPool instead of their plain counterparts. The jgiannuzzi fork of
+// go-sqlite3 applies PRAGMA key via the DSN before any other pragmas.
 //
 // Migrations are handled by goose and driven by an embed.FS containing *.sql
 // files under a "migrations/" directory.
@@ -94,9 +94,43 @@ func TestDB[Queries any](migrations embed.FS, querier Querier[Queries]) *DB[Quer
 }
 
 // GetDB opens (or creates) the SQLite database at dbName, runs all pending
-// migrations, and returns an open DB. Pass a non-nil key to use SQLCipher
-// encryption; pass nil for an unencrypted database.
-func GetDB[Queries any](dbName string, migrations embed.FS, querier Querier[Queries], key []byte) (*DB[Queries], error) {
+// migrations, and returns an open DB.
+func GetDB[Queries any](dbName string, migrations embed.FS, querier Querier[Queries]) (*DB[Queries], error) {
+	return getDB(dbName, migrations, querier, nil)
+}
+
+// GetEncryptedDB opens (or creates) the SQLCipher-encrypted SQLite database at
+// dbName, runs all pending migrations, and returns an open DB.
+func GetEncryptedDB[Queries any](dbName string, migrations embed.FS, querier Querier[Queries], key []byte) (*DB[Queries], error) {
+	return getDB(dbName, migrations, querier, key)
+}
+
+// OpenDB opens an existing database without running migrations. If the file
+// does not exist yet, it falls back to GetDB (which creates and migrates it).
+// Use this on the hot path when migrations have already been applied (e.g.
+// via MigrateAll at startup).
+func OpenDB[Queries any](dbName string, migrations embed.FS, querier Querier[Queries]) (*DB[Queries], error) {
+	if _, err := os.Stat(dbName); err != nil {
+		// File doesn't exist — new DB, must create and migrate.
+		return GetDB(dbName, migrations, querier)
+	}
+
+	return openDBConns(dbName, querier, nil)
+}
+
+// OpenEncryptedDB opens an existing SQLCipher-encrypted database without
+// running migrations. If the file does not exist yet, it falls back to
+// GetEncryptedDB (which creates and migrates it).
+func OpenEncryptedDB[Queries any](dbName string, migrations embed.FS, querier Querier[Queries], key []byte) (*DB[Queries], error) {
+	if _, err := os.Stat(dbName); err != nil {
+		// File doesn't exist — new DB, must create and migrate.
+		return GetEncryptedDB(dbName, migrations, querier, key)
+	}
+
+	return openDBConns(dbName, querier, key)
+}
+
+func getDB[Queries any](dbName string, migrations embed.FS, querier Querier[Queries], key []byte) (*DB[Queries], error) {
 	if err := os.MkdirAll(filepath.Dir(dbName), 0o755); err != nil {
 		return nil, fmt.Errorf("creating db dir: %w", err)
 	}
@@ -119,19 +153,6 @@ func GetDB[Queries any](dbName string, migrations embed.FS, querier Querier[Quer
 		return nil, err
 	}
 	db.Close()
-
-	return openDBConns(dbName, querier, key)
-}
-
-// OpenDB opens an existing database without running migrations. If the file
-// does not exist yet, it falls back to GetDB (which creates and migrates it).
-// Use this on the hot path when migrations have already been applied (e.g.
-// via MigrateAll at startup).
-func OpenDB[Queries any](dbName string, migrations embed.FS, querier Querier[Queries], key []byte) (*DB[Queries], error) {
-	if _, err := os.Stat(dbName); err != nil {
-		// File doesn't exist — new DB, must create and migrate.
-		return GetDB(dbName, migrations, querier, key)
-	}
 
 	return openDBConns(dbName, querier, key)
 }
@@ -507,7 +528,7 @@ func (p *Pool[Queries]) getOrCreate(key string) (*poolEntry[Queries], error) {
 		dbKey = k
 	}
 
-	newDB, err := GetDB(dbPath, p.migrations, p.querier, dbKey)
+	newDB, err := getDB(dbPath, p.migrations, p.querier, dbKey)
 	if err != nil {
 		return nil, fmt.Errorf("opening db for %q: %w", key, err)
 	}
