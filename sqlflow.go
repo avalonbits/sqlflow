@@ -78,7 +78,7 @@ type DBTX interface {
 // SQLite busy errors using exponential backoff; Read calls retry indefinitely
 // until the context is cancelled.
 type DB[Queries any] struct {
-	factory        func(tx DBTX) *Queries
+	factory        Factory[Queries]
 	rddb           *sql.DB
 	backoffRetries int
 
@@ -88,7 +88,7 @@ type DB[Queries any] struct {
 
 // TestDB creates an in-memory SQLite database, runs migrations, and returns a
 // DB ready for use in tests. Panics on any error so test setup stays concise.
-func TestDB[Queries any](migrations embed.FS, factory func(tx DBTX) *Queries) *DB[Queries] {
+func TestDB[Queries any](migrations embed.FS, factory Factory[Queries]) *DB[Queries] {
 	db, err := sql.Open("sqlite3", fmt.Sprintf(writeDSN, ":memory:"))
 	if err != nil {
 		panic(err)
@@ -107,7 +107,7 @@ func TestDB[Queries any](migrations embed.FS, factory func(tx DBTX) *Queries) *D
 // migrations, and returns an open DB. Pass a non-nil key to use SQLCipher
 // encryption; pass nil for an unencrypted database.
 func GetDB[Queries any](
-	dbName string, migrations embed.FS, factory func(tx DBTX) *Queries, key []byte) (*DB[Queries], error) {
+	dbName string, migrations embed.FS, factory Factory[Queries], key []byte) (*DB[Queries], error) {
 	if err := os.MkdirAll(filepath.Dir(dbName), 0o755); err != nil {
 		return nil, fmt.Errorf("creating db dir: %w", err)
 	}
@@ -139,7 +139,7 @@ func GetDB[Queries any](
 // Use this on the hot path when migrations have already been applied (e.g.
 // via MigrateAll at startup).
 func OpenDB[Queries any](
-	dbName string, migrations embed.FS, factory func(tx DBTX) *Queries, key []byte) (*DB[Queries], error) {
+	dbName string, migrations embed.FS, factory Factory[Queries], key []byte) (*DB[Queries], error) {
 	if _, err := os.Stat(dbName); err != nil {
 		// File doesn't exist — new DB, must create and migrate.
 		return GetDB(dbName, migrations, factory, key)
@@ -237,7 +237,7 @@ var ErrKeyNotAvailable = errors.New("data key not available")
 type Pool[Queries any] struct {
 	dir        string
 	migrations embed.FS
-	factory    func(DBTX) *Queries
+	factory    Factory[Queries]
 
 	mu          sync.Mutex // serializes DB creation
 	cache       *ristretto.Cache[string, *poolEntry[Queries]]
@@ -275,7 +275,7 @@ func (p *Pool[Queries]) Wait() {
 // keyProvider, if non-nil, is set on the pool before MigrateAll runs so that
 // encrypted pools skip migration (per-DB migration is lazy in getOrCreate).
 func NewPool[Queries any](
-	dir string, migrations embed.FS, factory func(DBTX) *Queries, maxCached int64,
+	dir string, migrations embed.FS, factory Factory[Queries], maxCached int64,
 	keyProvider func(string) ([]byte, bool),
 	inactivityTimeout time.Duration,
 ) (*Pool[Queries], error) {
@@ -320,7 +320,7 @@ func NewPool[Queries any](
 
 // TestPool returns a pool backed by dir for tests. Panics on error, matching
 // the TestDB convention.
-func TestPool[Queries any](dir string, migrations embed.FS, factory func(DBTX) *Queries) *Pool[Queries] {
+func TestPool[Queries any](dir string, migrations embed.FS, factory Factory[Queries]) *Pool[Queries] {
 	p, err := NewPool(dir, migrations, factory, 100_000, nil, 0)
 	if err != nil {
 		panic(fmt.Sprintf("creating test pool: %v", err))
@@ -427,7 +427,7 @@ func (p *Pool[Queries]) Close() error {
 	return errors.Join(errs...)
 }
 
-func openDBConns[Queries any](dbName string, factory func(tx DBTX) *Queries, key []byte) (*DB[Queries], error) {
+func openDBConns[Queries any](dbName string, factory Factory[Queries], key []byte) (*DB[Queries], error) {
 	var rDSN, wDSN string
 
 	if len(key) > 0 {
