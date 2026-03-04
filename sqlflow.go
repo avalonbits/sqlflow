@@ -17,8 +17,8 @@
 // NewEncryptedPool instead of their plain counterparts. The jgiannuzzi fork of
 // go-sqlite3 applies PRAGMA key via the DSN before any other pragmas.
 //
-// Migrations are handled by goose and driven by an embed.FS containing *.sql
-// files under a "migrations/" directory.
+// Migrations are handled by goose. Use EmbedMigrations to source them from an
+// embedded FS, or DirMigrations to read them from a directory on disk.
 package sqlflow
 
 import (
@@ -28,6 +28,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,6 +42,29 @@ import (
 
 	sqlite3lib "github.com/mattn/go-sqlite3"
 )
+
+// Migrations specifies where goose migration files are located.
+// Construct one with EmbedMigrations or DirMigrations.
+type Migrations struct {
+	// fsys is the filesystem to pass to goose.SetBaseFS.
+	fsys fs.FS
+
+	// dir is the directory path passed to goose.Up.
+	// "migrations" for embedded FS layouts; "." for DirMigrations.
+	dir string
+}
+
+// EmbedMigrations sources migration files from an embedded FS. The FS must
+// contain a "migrations/" subdirectory holding the *.sql files.
+func EmbedMigrations(fsys embed.FS) Migrations {
+	return Migrations{fsys: fsys, dir: "migrations"}
+}
+
+// DirMigrations sources migration files directly from a directory on disk.
+// path should point to the directory that contains the *.sql files.
+func DirMigrations(path string) Migrations {
+	return Migrations{fsys: os.DirFS(path), dir: "."}
+}
 
 // Querier is a function that builds a per-transaction accessor of type Queries from
 // a DBTX. It is called once per transaction inside Read and Write.
@@ -88,7 +112,7 @@ type DB[Queries any] struct {
 
 // TestDB creates an in-memory SQLite database, runs migrations, and returns a
 // DB ready for use in tests. Panics on any error so test setup stays concise.
-func TestDB[Queries any](migrations embed.FS, querier Querier[Queries]) *DB[Queries] {
+func TestDB[Queries any](migrations Migrations, querier Querier[Queries]) *DB[Queries] {
 	db, err := sql.Open("sqlite3", fmt.Sprintf(writeDSN, ":memory:"))
 	if err != nil {
 		panic(err)
@@ -105,13 +129,13 @@ func TestDB[Queries any](migrations embed.FS, querier Querier[Queries]) *DB[Quer
 
 // GetDB opens (or creates) the SQLite database at dbName, runs all pending
 // migrations, and returns an open DB.
-func GetDB[Queries any](dbName string, migrations embed.FS, querier Querier[Queries]) (*DB[Queries], error) {
+func GetDB[Queries any](dbName string, migrations Migrations, querier Querier[Queries]) (*DB[Queries], error) {
 	return getDB(dbName, migrations, querier, nil)
 }
 
 // GetEncryptedDB opens (or creates) the SQLCipher-encrypted SQLite database at
 // dbName, runs all pending migrations, and returns an open DB.
-func GetEncryptedDB[Queries any](dbName string, migrations embed.FS, querier Querier[Queries], key []byte) (*DB[Queries], error) {
+func GetEncryptedDB[Queries any](dbName string, migrations Migrations, querier Querier[Queries], key []byte) (*DB[Queries], error) {
 	return getDB(dbName, migrations, querier, key)
 }
 
@@ -119,7 +143,7 @@ func GetEncryptedDB[Queries any](dbName string, migrations embed.FS, querier Que
 // does not exist yet, it falls back to GetDB (which creates and migrates it).
 // Use this on the hot path when migrations have already been applied (e.g.
 // via MigrateAll at startup).
-func OpenDB[Queries any](dbName string, migrations embed.FS, querier Querier[Queries]) (*DB[Queries], error) {
+func OpenDB[Queries any](dbName string, migrations Migrations, querier Querier[Queries]) (*DB[Queries], error) {
 	if _, err := os.Stat(dbName); err != nil {
 		// File doesn't exist — new DB, must create and migrate.
 		return GetDB(dbName, migrations, querier)
@@ -131,7 +155,7 @@ func OpenDB[Queries any](dbName string, migrations embed.FS, querier Querier[Que
 // OpenEncryptedDB opens an existing SQLCipher-encrypted database without
 // running migrations. If the file does not exist yet, it falls back to
 // GetEncryptedDB (which creates and migrates it).
-func OpenEncryptedDB[Queries any](dbName string, migrations embed.FS, querier Querier[Queries], key []byte) (*DB[Queries], error) {
+func OpenEncryptedDB[Queries any](dbName string, migrations Migrations, querier Querier[Queries], key []byte) (*DB[Queries], error) {
 	if _, err := os.Stat(dbName); err != nil {
 		// File doesn't exist — new DB, must create and migrate.
 		return GetEncryptedDB(dbName, migrations, querier, key)
@@ -140,7 +164,7 @@ func OpenEncryptedDB[Queries any](dbName string, migrations embed.FS, querier Qu
 	return openDBConns(dbName, querier, key)
 }
 
-func getDB[Queries any](dbName string, migrations embed.FS, querier Querier[Queries], key []byte) (*DB[Queries], error) {
+func getDB[Queries any](dbName string, migrations Migrations, querier Querier[Queries], key []byte) (*DB[Queries], error) {
 	if err := os.MkdirAll(filepath.Dir(dbName), 0o755); err != nil {
 		return nil, fmt.Errorf("creating db dir: %w", err)
 	}
@@ -250,8 +274,8 @@ type Pool[Queries any] struct {
 	// dir is the directory under which per-key *.db files are stored.
 	dir string
 
-	// migrations is the embedded FS containing goose migration files.
-	migrations embed.FS
+	// migrations specifies where goose migration files are located.
+	migrations Migrations
 
 	// querier constructs the per-transaction accessor for each opened DB.
 	querier Querier[Queries]
@@ -301,7 +325,7 @@ func (p *Pool[Queries]) Wait() {
 // keyProvider, if non-nil, is set on the pool before MigrateAll runs so that
 // encrypted pools skip migration (per-DB migration is lazy in getOrCreate).
 func NewPool[Queries any](
-	dir string, migrations embed.FS, querier Querier[Queries], maxCached int64,
+	dir string, migrations Migrations, querier Querier[Queries], maxCached int64,
 	keyProvider func(string) ([]byte, bool),
 	inactivityTimeout time.Duration,
 ) (*Pool[Queries], error) {
@@ -346,7 +370,7 @@ func NewPool[Queries any](
 
 // TestPool returns a pool backed by dir for tests. Panics on error, matching
 // the TestDB convention.
-func TestPool[Queries any](dir string, migrations embed.FS, querier Querier[Queries]) *Pool[Queries] {
+func TestPool[Queries any](dir string, migrations Migrations, querier Querier[Queries]) *Pool[Queries] {
 	p, err := NewPool(dir, migrations, querier, 100_000, nil, 0)
 	if err != nil {
 		panic(fmt.Sprintf("creating test pool: %v", err))
@@ -661,16 +685,16 @@ func cipherReadDSNFor(path string, key []byte) string {
 	return path + "?_key=x%27" + hex.EncodeToString(key) + "%27&_cipher=sqlcipher&_journal=wal&_sync=1&_busy_timeout=5000&_cache_size=10000&_txlock=deferred"
 }
 
-func migrate(db *sql.DB, migrations embed.FS) error {
+func migrate(db *sql.DB, migrations Migrations) error {
 	gooseMu.Lock()
 	defer gooseMu.Unlock()
 
-	goose.SetBaseFS(migrations)
+	goose.SetBaseFS(migrations.fsys)
 	if err := goose.SetDialect("sqlite"); err != nil {
 		return err
 	}
 
-	return goose.Up(db, "migrations")
+	return goose.Up(db, migrations.dir)
 }
 
 func (db *DB[Queries]) transaction(ctx context.Context, rdbms *sql.DB, f func(*Queries) error) error {
