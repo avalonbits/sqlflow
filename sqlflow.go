@@ -52,6 +52,8 @@ type Evicter interface {
 	Evict(userID string)
 }
 
+// DBTX is the interface satisfied by both *sql.DB and *sql.Tx, allowing
+// sqlc-generated query structs to be used within or outside a transaction.
 type DBTX interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 	PrepareContext(context.Context, string) (*sql.Stmt, error)
@@ -80,6 +82,8 @@ type DB[Queries any] struct {
 	wrdb *sql.DB
 }
 
+// TestDB creates an in-memory SQLite database, runs migrations, and returns a
+// DB ready for use in tests. Panics on any error so test setup stays concise.
 func TestDB[Queries any](migrations embed.FS, factory func(tx DBTX) *Queries) *DB[Queries] {
 	db, err := sql.Open("sqlite3", fmt.Sprintf(writeDSN, ":memory:"))
 	if err != nil {
@@ -95,6 +99,9 @@ func TestDB[Queries any](migrations embed.FS, factory func(tx DBTX) *Queries) *D
 	return &DB[Queries]{factory: factory, rddb: db, mu: &sync.Mutex{}, wrdb: db, backoffRetries: 1}
 }
 
+// GetDB opens (or creates) the SQLite database at dbName, runs all pending
+// migrations, and returns an open DB. Pass a non-nil key to use SQLCipher
+// encryption; pass nil for an unencrypted database.
 func GetDB[Queries any](
 	dbName string, migrations embed.FS, factory func(tx DBTX) *Queries, key []byte) (*DB[Queries], error) {
 	if err := os.MkdirAll(filepath.Dir(dbName), 0o755); err != nil {
@@ -137,10 +144,15 @@ func OpenDB[Queries any](
 	return openDBConns(dbName, factory, key)
 }
 
+// RDBMS returns the underlying write *sql.DB. Use this only when direct
+// database access is needed outside the Read/Write transaction helpers (e.g.
+// for PRAGMA statements or schema inspection).
 func (db *DB[Queries]) RDBMS() *sql.DB {
 	return db.wrdb
 }
 
+// Close closes both the read and write database connections. It waits for any
+// in-flight operations to complete before returning.
 func (db *DB[Queries]) Close() error {
 	return errors.Join(db.rddb.Close(), db.wrdb.Close())
 }
@@ -157,12 +169,19 @@ func (db *DB[Queries]) Checkpoint(ctx context.Context) error {
 	return err
 }
 
+// Read executes f inside a read-only deferred transaction. It retries on
+// transient SQLite busy errors using exponential backoff until ctx is
+// cancelled. Errors returned by f are treated as permanent and not retried.
 func (db *DB[Queries]) Read(ctx context.Context, f func(queries *Queries) error) error {
 	return backoff.Retry(func() error {
 		return db.transaction(ctx, db.rddb, f)
 	}, backoff.WithContext(backoff.NewExponentialBackOff(), ctx))
 }
 
+// Write executes f inside an immediate (exclusive) transaction under the write
+// mutex. It retries on transient SQLite busy errors up to backoffRetries times
+// with exponential backoff. Errors returned by f are treated as permanent and
+// cause an immediate rollback with no retry.
 func (db *DB[Queries]) Write(ctx context.Context, f func(queries *Queries) error) error {
 	var err error
 
@@ -196,6 +215,8 @@ func (db *DB[Queries]) Write(ctx context.Context, f func(queries *Queries) error
 	return fmt.Errorf("error after exhasuting retries: %w", err)
 }
 
+// NoRows reports whether err is a sql.ErrNoRows "not found" result. Use this
+// instead of errors.Is(err, sql.ErrNoRows) for readability at call sites.
 func NoRows(err error) bool {
 	return err != nil && errors.Is(err, sql.ErrNoRows)
 }
@@ -304,6 +325,9 @@ func TestPool[Queries any](dir string, migrations embed.FS, factory func(DBTX) *
 	return p
 }
 
+// Read acquires the database for key and executes f inside a read-only
+// deferred transaction. The pool entry's reference count is held for the
+// duration so the database is not closed while f is running.
 func (p *Pool[Queries]) Read(ctx context.Context, key string, f func(queries *Queries) error) error {
 	entry, err := p.acquire(key)
 	if err != nil {
@@ -314,6 +338,9 @@ func (p *Pool[Queries]) Read(ctx context.Context, key string, f func(queries *Qu
 	return entry.db.Read(ctx, f)
 }
 
+// Write acquires the database for key and executes f inside an immediate
+// (exclusive) transaction. The pool entry's reference count is held for the
+// duration so the database is not closed while f is running.
 func (p *Pool[Queries]) Write(ctx context.Context, key string, f func(queries *Queries) error) error {
 	entry, err := p.acquire(key)
 	if err != nil {
