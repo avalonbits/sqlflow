@@ -1,0 +1,600 @@
+package sqlflow
+
+import (
+	"context"
+	"database/sql"
+	"embed"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/cenkalti/backoff/v4"
+	"github.com/dgraph-io/ristretto/v2"
+	"github.com/pressly/goose/v3"
+
+	sqlite3lib "github.com/mattn/go-sqlite3"
+)
+
+// acquireLockFn is populated by flock_linux.go on Linux builds.
+// nil on other platforms — pool entries are not flock-protected.
+var acquireLockFn func(lockPath string) (*os.File, error)
+
+// Evicter is implemented by any pool that can evict a single user's cached
+// database entry on demand (e.g. on logout or inactivity).
+type Evicter interface {
+	Evict(userID string)
+}
+
+type DBTX interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	PrepareContext(context.Context, string) (*sql.Stmt, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+type DB[Queries any] struct {
+	factory        func(tx DBTX) *Queries
+	rddb           *sql.DB
+	backoffRetries int
+
+	mu   *sync.Mutex
+	wrdb *sql.DB
+}
+
+func TestDB[Queries any](migrations embed.FS, factory func(tx DBTX) *Queries) *DB[Queries] {
+	db, err := sql.Open("sqlite3", fmt.Sprintf(writeDSN, ":memory:"))
+	if err != nil {
+		panic(err)
+	}
+	db.SetMaxOpenConns(1)
+
+	if err := migrate(db, migrations); err != nil {
+		db.Close()
+		panic(err)
+	}
+
+	return &DB[Queries]{factory: factory, rddb: db, mu: &sync.Mutex{}, wrdb: db, backoffRetries: 1}
+}
+
+func GetDB[Queries any](
+	dbName string, migrations embed.FS, factory func(tx DBTX) *Queries, key []byte) (*DB[Queries], error) {
+	if err := os.MkdirAll(filepath.Dir(dbName), 0o755); err != nil {
+		return nil, fmt.Errorf("creating db dir: %w", err)
+	}
+
+	var db *sql.DB
+	var err error
+
+	if len(key) > 0 {
+		db, err = sql.Open("sqlite3", cipherWriteDSNFor(dbName, key))
+	} else {
+		db, err = sql.Open("sqlite3", fmt.Sprintf(writeDSN, dbName))
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if err := migrate(db, migrations); err != nil {
+		db.Close()
+		return nil, err
+	}
+	db.Close()
+
+	return openDBConns(dbName, factory, key)
+}
+
+// OpenDB opens an existing database without running migrations. If the file
+// does not exist yet, it falls back to GetDB (which creates and migrates it).
+// Use this on the hot path when migrations have already been applied (e.g.
+// via MigrateAll at startup).
+func OpenDB[Queries any](
+	dbName string, migrations embed.FS, factory func(tx DBTX) *Queries, key []byte) (*DB[Queries], error) {
+	if _, err := os.Stat(dbName); err != nil {
+		// File doesn't exist — new DB, must create and migrate.
+		return GetDB(dbName, migrations, factory, key)
+	}
+	return openDBConns(dbName, factory, key)
+}
+
+func openDBConns[Queries any](dbName string, factory func(tx DBTX) *Queries, key []byte) (*DB[Queries], error) {
+	var rDSN, wDSN string
+
+	if len(key) > 0 {
+		wDSN = cipherWriteDSNFor(dbName, key)
+		rDSN = cipherReadDSNFor(dbName, key)
+	} else {
+		wDSN = fmt.Sprintf(writeDSN, dbName)
+		rDSN = fmt.Sprintf(readDSN, dbName)
+	}
+
+	wrdb, err := sql.Open("sqlite3", wDSN)
+	if err != nil {
+		return nil, err
+	}
+	wrdb.SetMaxOpenConns(1)
+
+	rddb, err := sql.Open("sqlite3", rDSN)
+	if err != nil {
+		wrdb.Close()
+		return nil, err
+	}
+
+	return &DB[Queries]{factory: factory, rddb: rddb, mu: &sync.Mutex{}, wrdb: wrdb, backoffRetries: 5}, nil
+}
+
+func (db *DB[Queries]) RDBMS() *sql.DB {
+	return db.wrdb
+}
+
+func (db *DB[Queries]) Close() error {
+	return errors.Join(db.rddb.Close(), db.wrdb.Close())
+}
+
+// Checkpoint runs PRAGMA wal_checkpoint(TRUNCATE) under the write mutex.
+// WAL frames are moved into the main database file and, if all readers are
+// done, the WAL file is reset to zero size.
+func (db *DB[Queries]) Checkpoint(ctx context.Context) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	_, err := db.wrdb.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+	return err
+}
+
+func (db *DB[Queries]) Read(ctx context.Context, f func(queries *Queries) error) error {
+	return backoff.Retry(func() error {
+		return db.transaction(ctx, db.rddb, f)
+	}, backoff.WithContext(backoff.NewExponentialBackOff(), ctx))
+}
+
+func (db *DB[Queries]) Write(ctx context.Context, f func(queries *Queries) error) error {
+	var err error
+
+	b := backoff.WithContext(backoff.NewExponentialBackOff(), ctx)
+	for range db.backoffRetries {
+		db.mu.Lock()
+		err = db.transaction(ctx, db.wrdb, f)
+		db.mu.Unlock()
+
+		if err == nil {
+			return nil
+		}
+
+		var permanent *backoff.PermanentError
+		if errors.As(err, &permanent) {
+			return permanent.Err
+		}
+
+		next := b.NextBackOff()
+		if next == backoff.Stop {
+			return err
+		}
+
+		select {
+		case <-time.After(next):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return fmt.Errorf("error after exhasuting retries: %w", err)
+}
+
+func NoRows(err error) bool {
+	return err != nil && errors.Is(err, sql.ErrNoRows)
+}
+
+// ErrKeyNotAvailable is returned by an encrypted Pool when the data key for a
+// user is not in the in-memory key store (user not logged in, TTL expired, or
+// server restarted). The caller should re-authenticate to reload the key.
+var ErrKeyNotAvailable = errors.New("data key not available")
+
+// Pool is a per-key connection pool backed by a ristretto cache with TinyLFU
+// eviction. Each key (e.g. user ID) gets its own SQLite database file under
+// dir. When the cache evicts an entry, its DB is closed only after all
+// in-flight operations finish (reference-counted via poolEntry).
+type Pool[Queries any] struct {
+	dir        string
+	migrations embed.FS
+	factory    func(DBTX) *Queries
+
+	mu          sync.Mutex // serializes DB creation
+	cache       *ristretto.Cache[string, *poolEntry[Queries]]
+	keyProvider func(userID string) ([]byte, bool)
+
+	inactivityTimeout time.Duration
+	reapCancel        context.CancelFunc
+}
+
+// SetKeyProvider wires the data key lookup function into the pool. Must be
+// called before any Read/Write on the pool.
+func (p *Pool[Queries]) SetKeyProvider(fn func(string) ([]byte, bool)) {
+	p.keyProvider = fn
+}
+
+// Evict immediately removes the pool entry for userID from the cache, closing
+// the database once all in-flight operations finish. No-op if the entry is not
+// cached.
+func (p *Pool[Queries]) Evict(userID string) {
+	p.cache.Del(userID)
+}
+
+// Wait blocks until all pending cache evictions have been processed. Call this
+// after Evict to ensure the evicted entry's resources (including any lock file)
+// have been fully released before attempting to acquire an exclusive lock.
+func (p *Pool[Queries]) Wait() {
+	p.cache.Wait()
+}
+
+// NewPool creates a Pool backed by on-disk SQLite databases. maxCached
+// controls the maximum number of open databases kept in the cache (minimum
+// 1000). inactivityTimeout, if > 0, starts a background reaper that evicts
+// entries idle for longer than the timeout; pass 0 to disable.
+// It ensures the directory exists and migrates all existing databases.
+// keyProvider, if non-nil, is set on the pool before MigrateAll runs so that
+// encrypted pools skip migration (per-DB migration is lazy in getOrCreate).
+func NewPool[Queries any](
+	dir string, migrations embed.FS, factory func(DBTX) *Queries, maxCached int64,
+	keyProvider func(string) ([]byte, bool),
+	inactivityTimeout time.Duration,
+) (*Pool[Queries], error) {
+	maxCached = max(maxCached, 1000)
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("creating pool dir: %w", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	p := &Pool[Queries]{
+		dir:               dir,
+		migrations:        migrations,
+		factory:           factory,
+		keyProvider:       keyProvider,
+		inactivityTimeout: inactivityTimeout,
+		reapCancel:        cancel,
+	}
+	cache, err := newPoolCache[Queries](maxCached)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("creating pool cache: %w", err)
+	}
+	p.cache = cache
+
+	if err := p.MigrateAll(); err != nil {
+		cancel()
+		p.cache.Close()
+		return nil, fmt.Errorf("migrating existing databases: %w", err)
+	}
+
+	if inactivityTimeout > 0 {
+		go p.runInactivityReaper(ctx)
+	}
+
+	return p, nil
+}
+
+// TestPool returns a pool backed by dir for tests. Panics on error, matching
+// the TestDB convention.
+func TestPool[Queries any](dir string, migrations embed.FS, factory func(DBTX) *Queries) *Pool[Queries] {
+	p, err := NewPool(dir, migrations, factory, 100_000, nil, 0)
+	if err != nil {
+		panic(fmt.Sprintf("creating test pool: %v", err))
+	}
+
+	return p
+}
+
+func (p *Pool[Queries]) Read(ctx context.Context, key string, f func(queries *Queries) error) error {
+	entry, err := p.acquire(key)
+	if err != nil {
+		return err
+	}
+	defer entry.release()
+
+	return entry.db.Read(ctx, f)
+}
+
+func (p *Pool[Queries]) Write(ctx context.Context, key string, f func(queries *Queries) error) error {
+	entry, err := p.acquire(key)
+	if err != nil {
+		return err
+	}
+	defer entry.release()
+
+	return entry.db.Write(ctx, f)
+}
+
+// MigrateAll opens every *.db file under dir, runs migrations, and closes.
+// If a keyProvider is configured, migration is skipped (lazy per-DB migration
+// happens in getOrCreate when the data key is available).
+func (p *Pool[Queries]) MigrateAll() error {
+	if p.keyProvider != nil {
+		return nil
+	}
+
+	matches, err := filepath.Glob(filepath.Join(p.dir, "*.db"))
+	if err != nil {
+		return fmt.Errorf("globbing db files: %w", err)
+	}
+
+	for _, path := range matches {
+		db, err := sql.Open("sqlite3", fmt.Sprintf(writeDSN, path))
+		if err != nil {
+			return fmt.Errorf("opening %s for migration: %w", path, err)
+		}
+		if err := migrate(db, p.migrations); err != nil {
+			db.Close()
+			return fmt.Errorf("migrating %s: %w", path, err)
+		}
+		db.Close()
+	}
+
+	return nil
+}
+
+// ListKeys returns the key (user ID) for every database file in the pool
+// directory. The returned slice is sorted by filesystem order.
+func (p *Pool[Queries]) ListKeys() ([]string, error) {
+	matches, err := filepath.Glob(filepath.Join(p.dir, "*.db"))
+	if err != nil {
+		return nil, fmt.Errorf("listing pool keys: %w", err)
+	}
+
+	keys := make([]string, 0, len(matches))
+	for _, path := range matches {
+		key := strings.TrimSuffix(filepath.Base(path), ".db")
+		keys = append(keys, key)
+	}
+	return keys, nil
+}
+
+// Close stops the inactivity reaper and closes all cached databases.
+// sql.DB.Close waits for in-flight operations to finish, so this blocks until
+// everything drains.
+func (p *Pool[Queries]) Close() error {
+	p.reapCancel()
+
+	var errs []error
+
+	p.cache.IterValues(func(entry *poolEntry[Queries]) (stop bool) {
+		entry.closing.Store(true)
+		entry.once.Do(func() {
+			if err := entry.db.Close(); err != nil {
+				errs = append(errs, err)
+			}
+			if entry.lockFile != nil {
+				entry.lockFile.Close()
+			}
+		})
+		return false
+	})
+	p.cache.Close()
+
+	return errors.Join(errs...)
+}
+
+// runInactivityReaper periodically evicts pool entries that have been idle
+// longer than p.inactivityTimeout. Stops when ctx is cancelled.
+func (p *Pool[Queries]) runInactivityReaper(ctx context.Context) {
+	interval := max(p.inactivityTimeout/4, time.Second)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.reapInactive()
+		}
+	}
+}
+
+func (p *Pool[Queries]) reapInactive() {
+	cutoff := time.Now().Add(-p.inactivityTimeout).UnixNano()
+
+	// Collect keys first; calling Del inside IterValues would deadlock because
+	// IterValues holds a read lock and Del needs a write lock on the same shard.
+	var toEvict []string
+	p.cache.IterValues(func(entry *poolEntry[Queries]) (stop bool) {
+		if entry.refs.Load() == 0 && entry.lastActivity.Load() < cutoff {
+			toEvict = append(toEvict, entry.key)
+		}
+		return false
+	})
+	for _, key := range toEvict {
+		p.cache.Del(key)
+	}
+}
+
+// acquire returns a poolEntry with an incremented ref count. The caller must
+// call release when done. If the entry is being evicted, acquire retries with
+// a fresh entry.
+func (p *Pool[Queries]) acquire(key string) (*poolEntry[Queries], error) {
+	for {
+		entry, err := p.getOrCreate(key)
+		if err != nil {
+			return nil, err
+		}
+		if entry.acquire() {
+			entry.lastActivity.Store(time.Now().UnixNano())
+			return entry, nil
+		}
+		// Entry is closing (evicted). Loop to create a replacement.
+	}
+}
+
+func (p *Pool[Queries]) getOrCreate(key string) (*poolEntry[Queries], error) {
+	if entry, ok := p.cache.Get(key); ok {
+		return entry, nil
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Double-check after acquiring lock.
+	if entry, ok := p.cache.Get(key); ok {
+		return entry, nil
+	}
+
+	dbPath := filepath.Join(p.dir, key+".db")
+
+	var dbKey []byte
+	if p.keyProvider != nil {
+		k, ok := p.keyProvider(key)
+		if !ok {
+			return nil, fmt.Errorf("%w for user %q — please log in again", ErrKeyNotAvailable, key)
+		}
+		dbKey = k
+	}
+
+	newDB, err := GetDB(dbPath, p.migrations, p.factory, dbKey)
+	if err != nil {
+		return nil, fmt.Errorf("opening db for %q: %w", key, err)
+	}
+
+	var lockFile *os.File
+	if acquireLockFn != nil {
+		lf, lerr := acquireLockFn(dbPath + ".lock")
+		if lerr != nil {
+			newDB.Close()
+			return nil, fmt.Errorf("acquiring shared lock for %q: %w", key, lerr)
+		}
+		lockFile = lf
+	}
+
+	entry := &poolEntry[Queries]{
+		key:      key,
+		db:       newDB,
+		lockFile: lockFile,
+	}
+	entry.lastActivity.Store(time.Now().UnixNano())
+	p.cache.Set(key, entry, 1)
+	p.cache.Wait()
+
+	return entry, nil
+}
+
+// poolEntry wraps a DB with reference counting so that evicted databases are
+// not closed while goroutines are still using them.
+type poolEntry[Queries any] struct {
+	key          string
+	db           *DB[Queries]
+	lockFile     *os.File
+	lastActivity atomic.Int64 // unix nanoseconds; updated on every acquire
+	refs         atomic.Int32
+	closing      atomic.Bool
+	once         sync.Once
+}
+
+// acquire increments the reference count. Returns false if the entry is being
+// evicted, in which case the caller should obtain a fresh entry.
+func (e *poolEntry[Queries]) acquire() bool {
+	e.refs.Add(1)
+	if e.closing.Load() {
+		e.release()
+		return false
+	}
+	return true
+}
+
+// release decrements the reference count. If the entry has been evicted and
+// this is the last reference, it closes the database.
+func (e *poolEntry[Queries]) release() {
+	if e.refs.Add(-1) == 0 && e.closing.Load() {
+		e.once.Do(func() {
+			e.db.Close()
+			if e.lockFile != nil {
+				e.lockFile.Close()
+			}
+		})
+	}
+}
+
+// evict marks the entry for closure. If no references are held, the database
+// is closed immediately; otherwise the last release handles it.
+func (e *poolEntry[Queries]) evict() {
+	e.closing.Store(true)
+	if e.refs.Load() == 0 {
+		e.once.Do(func() {
+			e.db.Close()
+			if e.lockFile != nil {
+				e.lockFile.Close()
+			}
+		})
+	}
+}
+
+func newPoolCache[Queries any](maxCached int64) (*ristretto.Cache[string, *poolEntry[Queries]], error) {
+	return ristretto.NewCache(&ristretto.Config[string, *poolEntry[Queries]]{
+		NumCounters: maxCached * 10,
+		MaxCost:     maxCached,
+		BufferItems: 64,
+		OnExit: func(entry *poolEntry[Queries]) {
+			if entry != nil {
+				entry.evict()
+			}
+		},
+	})
+}
+
+var gooseMu sync.Mutex
+
+const (
+	readDSN  = "%s?_journal=wal&_sync=1&_busy_timeout=5000&_cache_size=10000&_txlock=deferred"
+	writeDSN = "%s?_journal=wal&_sync=1&_busy_timeout=5000&_cache_size=10000&_txlock=immediate"
+)
+
+// cipherWriteDSNFor builds a DSN that applies PRAGMA key via the jgiannuzzi
+// fork's native _key parameter. The fork executes PRAGMA key before any
+// file-accessing pragmas (busy_timeout, synchronous, journal_mode), so WAL and
+// synchronous settings work correctly on existing encrypted databases.
+func cipherWriteDSNFor(path string, key []byte) string {
+	return path + "?_key=x%27" + hex.EncodeToString(key) + "%27&_cipher=sqlcipher&_journal=wal&_sync=1&_busy_timeout=5000&_cache_size=10000&_txlock=immediate"
+}
+
+func cipherReadDSNFor(path string, key []byte) string {
+	return path + "?_key=x%27" + hex.EncodeToString(key) + "%27&_cipher=sqlcipher&_journal=wal&_sync=1&_busy_timeout=5000&_cache_size=10000&_txlock=deferred"
+}
+
+func migrate(db *sql.DB, migrations embed.FS) error {
+	gooseMu.Lock()
+	defer gooseMu.Unlock()
+
+	goose.SetBaseFS(migrations)
+	if err := goose.SetDialect("sqlite"); err != nil {
+		return err
+	}
+
+	return goose.Up(db, "migrations")
+}
+
+func (db *DB[Queries]) transaction(ctx context.Context, rdbms *sql.DB, f func(queries *Queries) error) error {
+	tx, err := rdbms.BeginTx(ctx, nil)
+	if err != nil {
+		// SQLITE_NOTADB ("file is not a database") means the cipher key is
+		// wrong or the file is corrupt — retrying will never help.
+		var sqliteErr sqlite3lib.Error
+		if errors.As(err, &sqliteErr) && sqliteErr.Code == sqlite3lib.ErrNotADB {
+			return backoff.Permanent(fmt.Errorf("error creating transaction: %w", err))
+		}
+
+		return fmt.Errorf("error creating transaction: %w", err)
+	}
+
+	if err := f(db.factory(tx)); err != nil {
+		if rbErr := tx.Rollback(); rbErr != nil {
+			return errors.Join(err, rbErr)
+		}
+
+		return backoff.Permanent(err)
+	}
+
+	return tx.Commit()
+}
