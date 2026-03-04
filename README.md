@@ -18,12 +18,6 @@ build time.
 
 ## Examples
 
-All four examples below are self-contained: copy any one into a `main.go`,
-run `go mod init example && go mod tidy && go run .`, and it will compile and
-run. They share the same boilerplate — a `kvStore` type backed by a simple
-`kv(key, val)` table — and use `testing/fstest.MapFS` to supply migrations
-in-memory without needing any files on disk.
-
 ### 1. Single database — plain
 
 ```go
