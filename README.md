@@ -95,6 +95,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"log"
 	"os"
@@ -134,10 +135,9 @@ func main() {
 	path := "/tmp/encrypted.db"
 	os.Remove(path)
 
-	// 32-byte key — in production load this from a secure secret store.
 	key := make([]byte, 32)
-	for i := range key {
-		key[i] = byte(i + 1)
+	if _, err := rand.Read(key); err != nil {
+		log.Fatal(err)
 	}
 
 	db, err := sqlflow.GetEncryptedDB(path, migrations, newKV, key)
@@ -262,6 +262,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"log"
 	"os"
@@ -341,10 +342,10 @@ func main() {
 
 	// Simulate users logging in — each gets a unique 32-byte key.
 	users := []string{"alice", "bob", "carol"}
-	for i, user := range users {
+	for _, user := range users {
 		key := make([]byte, 32)
-		for j := range key {
-			key[j] = byte((i + 1) * (j + 1))
+		if _, err := rand.Read(key); err != nil {
+			log.Fatal(err)
 		}
 		store.Set(user, key)
 	}
