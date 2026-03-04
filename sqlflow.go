@@ -24,7 +24,6 @@ package sqlflow
 import (
 	"context"
 	"database/sql"
-	"embed"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -54,9 +53,10 @@ type Migrations struct {
 	dir string
 }
 
-// EmbedMigrations sources migration files from an embedded FS. The FS must
-// contain a "migrations/" subdirectory holding the *.sql files.
-func EmbedMigrations(fsys embed.FS) Migrations {
+// EmbedMigrations sources migration files from an fs.FS. The FS must contain
+// a "migrations/" subdirectory holding the *.sql files. Typically called with
+// an embed.FS or a sub-filesystem created with fs.Sub.
+func EmbedMigrations(fsys fs.FS) Migrations {
 	return Migrations{fsys: fsys, dir: "migrations"}
 }
 
@@ -700,6 +700,11 @@ func migrate(db *sql.DB, migrations Migrations) error {
 func (db *DB[Queries]) transaction(ctx context.Context, rdbms *sql.DB, f func(*Queries) error) error {
 	tx, err := rdbms.BeginTx(ctx, nil)
 	if err != nil {
+		// "sql: database is closed" means Close was called — retrying is pointless.
+		if strings.Contains(err.Error(), "database is closed") {
+			return backoff.Permanent(fmt.Errorf("error creating transaction: %w", err))
+		}
+
 		// SQLITE_NOTADB ("file is not a database") means the cipher key is
 		// wrong or the file is corrupt — retrying will never help.
 		var sqliteErr sqlite3lib.Error
