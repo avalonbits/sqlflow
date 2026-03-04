@@ -42,10 +42,6 @@ import (
 	sqlite3lib "github.com/mattn/go-sqlite3"
 )
 
-// acquireLockFn is populated by flock_linux.go on Linux builds.
-// nil on other platforms — pool entries are not flock-protected.
-var acquireLockFn func(lockPath string) (*os.File, error)
-
 // Evicter is implemented by any pool that can evict a single user's cached
 // database entry on demand (e.g. on logout or inactivity).
 type Evicter interface {
@@ -258,9 +254,7 @@ func (p *Pool[Queries]) Evict(userID string) {
 	p.cache.Del(userID)
 }
 
-// Wait blocks until all pending cache evictions have been processed. Call this
-// after Evict to ensure the evicted entry's resources (including any lock file)
-// have been fully released before attempting to acquire an exclusive lock.
+// Wait blocks until all pending cache evictions have been processed.
 func (p *Pool[Queries]) Wait() {
 	p.cache.Wait()
 }
@@ -413,9 +407,6 @@ func (p *Pool[Queries]) Close() error {
 			if err := entry.db.Close(); err != nil {
 				errs = append(errs, err)
 			}
-			if entry.lockFile != nil {
-				entry.lockFile.Close()
-			}
 		})
 
 		return false
@@ -534,21 +525,9 @@ func (p *Pool[Queries]) getOrCreate(key string) (*poolEntry[Queries], error) {
 		return nil, fmt.Errorf("opening db for %q: %w", key, err)
 	}
 
-	var lockFile *os.File
-	if acquireLockFn != nil {
-		lf, lerr := acquireLockFn(dbPath + ".lock")
-		if lerr != nil {
-			newDB.Close()
-
-			return nil, fmt.Errorf("acquiring shared lock for %q: %w", key, lerr)
-		}
-		lockFile = lf
-	}
-
 	entry := &poolEntry[Queries]{
-		key:      key,
-		db:       newDB,
-		lockFile: lockFile,
+		key: key,
+		db:  newDB,
 	}
 	entry.lastActivity.Store(time.Now().UnixNano())
 	p.cache.Set(key, entry, 1)
@@ -562,7 +541,6 @@ func (p *Pool[Queries]) getOrCreate(key string) (*poolEntry[Queries], error) {
 type poolEntry[Queries any] struct {
 	key          string
 	db           *DB[Queries]
-	lockFile     *os.File
 	lastActivity atomic.Int64 // unix nanoseconds; updated on every acquire
 	refs         atomic.Int32
 	closing      atomic.Bool
@@ -588,9 +566,6 @@ func (e *poolEntry[Queries]) release() {
 	if e.refs.Add(-1) == 0 && e.closing.Load() {
 		e.once.Do(func() {
 			e.db.Close()
-			if e.lockFile != nil {
-				e.lockFile.Close()
-			}
 		})
 	}
 }
@@ -602,9 +577,6 @@ func (e *poolEntry[Queries]) evict() {
 	if e.refs.Load() == 0 {
 		e.once.Do(func() {
 			e.db.Close()
-			if e.lockFile != nil {
-				e.lockFile.Close()
-			}
 		})
 	}
 }

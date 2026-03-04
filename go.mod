@@ -7,7 +7,6 @@ require (
 	github.com/dgraph-io/ristretto/v2 v2.4.0
 	github.com/mattn/go-sqlite3 v1.14.33
 	github.com/pressly/goose/v3 v3.26.0
-	golang.org/x/sys v0.40.0
 )
 
 require (
@@ -17,6 +16,7 @@ require (
 	github.com/sethvargo/go-retry v0.3.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/sync v0.16.0 // indirect
+	golang.org/x/sys v0.40.0 // indirect
 )
 
 replace github.com/mattn/go-sqlite3 v1.14.33 => github.com/jgiannuzzi/go-sqlite3 v1.14.33-0.20251022135613-4b8acdc70724
