@@ -19,4 +19,4 @@ require (
 	golang.org/x/sys v0.40.0 // indirect
 )
 
-replace github.com/mattn/go-sqlite3 v1.14.33 => github.com/jgiannuzzi/go-sqlite3 v1.14.33-0.20251022135613-4b8acdc70724
+replace github.com/mattn/go-sqlite3 => github.com/jgiannuzzi/go-sqlite3 v1.14.35-0.20260227142656-2c447b9a2806
