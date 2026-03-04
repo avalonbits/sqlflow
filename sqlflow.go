@@ -68,11 +68,21 @@ type DBTX interface {
 // SQLite busy errors using exponential backoff; Read calls retry indefinitely
 // until the context is cancelled.
 type DB[Queries any] struct {
-	querier        Querier[Queries]
-	rddb           *sql.DB
+	// querier constructs the per-transaction accessor from a DBTX.
+	querier Querier[Queries]
+
+	// rddb is the read connection pool; uses _txlock=deferred to allow
+	// concurrent readers.
+	rddb *sql.DB
+
+	// backoffRetries is the maximum number of write attempts before giving up.
 	backoffRetries int
 
-	mu   *sync.Mutex
+	// mu serialises access to wrdb so only one writer holds the SQLite WAL
+	// write lock at a time.
+	mu *sync.Mutex
+
+	// wrdb is the single write connection; MaxOpenConns=1, _txlock=immediate.
 	wrdb *sql.DB
 }
 
@@ -237,16 +247,32 @@ var ErrKeyNotAvailable = errors.New("data key not available")
 // dir. When the cache evicts an entry, its DB is closed only after all
 // in-flight operations finish (reference-counted via poolEntry).
 type Pool[Queries any] struct {
-	dir        string
-	migrations embed.FS
-	querier    Querier[Queries]
+	// dir is the directory under which per-key *.db files are stored.
+	dir string
 
-	mu          sync.Mutex // serializes DB creation
-	cache       *ristretto.Cache[string, *poolEntry[Queries]]
+	// migrations is the embedded FS containing goose migration files.
+	migrations embed.FS
+
+	// querier constructs the per-transaction accessor for each opened DB.
+	querier Querier[Queries]
+
+	// mu serialises DB creation so only one goroutine opens a new file at a
+	// time (double-checked locking with the cache).
+	mu sync.Mutex
+
+	// cache is the ristretto TinyLFU cache mapping keys to open poolEntries.
+	cache *ristretto.Cache[string, *poolEntry[Queries]]
+
+	// keyProvider returns the SQLCipher key for a given pool key. Nil for
+	// unencrypted pools.
 	keyProvider func(userID string) ([]byte, bool)
 
+	// inactivityTimeout is the idle duration after which a pool entry is
+	// evicted by the background reaper. Zero disables the reaper.
 	inactivityTimeout time.Duration
-	reapCancel        context.CancelFunc
+
+	// reapCancel stops the background inactivity reaper goroutine.
+	reapCancel context.CancelFunc
 }
 
 // SetKeyProvider wires the data key lookup function into the pool. Must be
@@ -547,12 +573,26 @@ func (p *Pool[Queries]) getOrCreate(key string) (*poolEntry[Queries], error) {
 // poolEntry wraps a DB with reference counting so that evicted databases are
 // not closed while goroutines are still using them.
 type poolEntry[Queries any] struct {
-	key          string
-	db           *DB[Queries]
-	lastActivity atomic.Int64 // unix nanoseconds; updated on every acquire
-	refs         atomic.Int32
-	closing      atomic.Bool
-	once         sync.Once
+	// key is the pool key (e.g. user ID) that identifies this entry.
+	key string
+
+	// db is the open database for this key.
+	db *DB[Queries]
+
+	// lastActivity records the last acquire time as unix nanoseconds; used by
+	// the inactivity reaper to decide whether to evict the entry.
+	lastActivity atomic.Int64
+
+	// refs counts the number of active Read/Write callers holding this entry.
+	refs atomic.Int32
+
+	// closing is set to true when the entry has been evicted from the cache.
+	// New acquires on a closing entry are rejected so a fresh entry is created.
+	closing atomic.Bool
+
+	// once ensures the database is closed exactly once regardless of how many
+	// goroutines race to release or evict the entry.
+	once sync.Once
 }
 
 // acquire increments the reference count. Returns false if the entry is being
