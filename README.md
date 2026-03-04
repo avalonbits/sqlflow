@@ -49,7 +49,7 @@ replace github.com/mattn/go-sqlite3 => github.com/jgiannuzzi/go-sqlite3 v1.14.35
 ```
 
 Then use `GetEncryptedDB` / `OpenEncryptedDB` (single database) or pass a
-`keyProvider` to `NewPool` (per-key pool). Both accept a 32-byte key; sqlflow
+`keyProvider` to `NewEncryptedPool` (per-key pool). Both accept a 32-byte key; sqlflow
 passes it to the driver via DSN parameters at open time.
 
 ## Concepts
@@ -144,8 +144,9 @@ Use `OpenDB` on the hot path to skip migrations when the file already exists.
 user). Databases are opened lazily and kept in a TinyLFU cache; evicted
 databases are closed only after all in-flight operations finish.
 
-Supply a `keyProvider` function to enable per-key encryption. If the key for a
-given user is unavailable, `Read`/`Write` return `sqlflow.ErrKeyNotAvailable`.
+Use `NewEncryptedPool` to enable per-key encryption; it requires a `keyProvider`
+function. If the key for a given user is unavailable, `Read`/`Write` return
+`sqlflow.ErrKeyNotAvailable`.
 
 ### Testing
 
@@ -344,9 +345,8 @@ func main() {
 		dir,
 		migrations,
 		newKV,
-		1_000,          // max cached open databases
-		nil,            // no encryption
-		5*time.Minute,  // evict after 5 min idle
+		1_000,         // max cached open databases
+		5*time.Minute, // evict after 5 min idle
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -441,12 +441,12 @@ func main() {
 
 	store := &keyStore{keys: make(map[string][]byte)}
 
-	pool, err := sqlflow.NewPool(
+	pool, err := sqlflow.NewEncryptedPool(
 		dir,
 		migrations,
 		newKV,
 		1_000,
-		store.Get,      // keyProvider — called per DB open
+		store.Get,     // keyProvider — called per DB open
 		5*time.Minute,
 	)
 	if err != nil {

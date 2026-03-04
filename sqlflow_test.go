@@ -902,7 +902,7 @@ func TestNewPool_CreatesDir(t *testing.T) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
 			dir := filepath.Join(t.TempDir(), "sub", "pool")
-			p, err := sqlflow.NewPool(dir, mc.fsys, newQuerier(), 1000, nil, 0)
+			p, err := sqlflow.NewPool(dir, mc.fsys, newQuerier(), 1000, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -931,7 +931,7 @@ func TestNewPool_MigratesExistingDBs(t *testing.T) {
 			}
 			rawDB.Close()
 
-			p, err := sqlflow.NewPool(dir, mc.fsys, newQuerier(), 1000, nil, 0)
+			p, err := sqlflow.NewPool(dir, mc.fsys, newQuerier(), 1000, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -954,7 +954,7 @@ func TestNewPool_BadDir(t *testing.T) {
 			if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			_, err := sqlflow.NewPool(filepath.Join(blocker, "pool"), mc.fsys, newQuerier(), 1000, nil, 0)
+			_, err := sqlflow.NewPool(filepath.Join(blocker, "pool"), mc.fsys, newQuerier(), 1000, 0)
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -980,7 +980,7 @@ func TestNewPool_BadMigration(t *testing.T) {
 				t.Fatal(err)
 			}
 			rawDB.Close()
-			_, err = sqlflow.NewPool(dir, mc.fsys, newQuerier(), 1000, nil, 0)
+			_, err = sqlflow.NewPool(dir, mc.fsys, newQuerier(), 1000, 0)
 			if err == nil {
 				t.Fatal("expected error with bad migration, got nil")
 			}
@@ -1089,7 +1089,7 @@ func TestPool_Read_NotFound(t *testing.T) {
 
 func TestPool_KeyNotAvailable(t *testing.T) {
 	t.Parallel()
-	p, err := sqlflow.NewPool(
+	p, err := sqlflow.NewEncryptedPool(
 		t.TempDir(), embedFS(), newQuerier(), 1000,
 		func(string) ([]byte, bool) { return nil, false },
 		0,
@@ -1169,7 +1169,7 @@ func TestPool_MigrateAll(t *testing.T) {
 				}
 				rawDB.Close()
 			}
-			p, err := sqlflow.NewPool(dir, mc.fsys, newQuerier(), 1000, nil, 0)
+			p, err := sqlflow.NewPool(dir, mc.fsys, newQuerier(), 1000, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1194,7 +1194,7 @@ func TestPool_MigrateAll_SkipsForEncrypted(t *testing.T) {
 			for i := range key {
 				key[i] = byte(i + 1)
 			}
-			p, err := sqlflow.NewPool(
+			p, err := sqlflow.NewEncryptedPool(
 				dir, mc.fsys, newQuerier(), 1000,
 				func(string) ([]byte, bool) { return key, true },
 				0,
@@ -1256,7 +1256,7 @@ func TestPool_ListKeys_Empty(t *testing.T) {
 
 func TestPool_InactivityReaper(t *testing.T) {
 	t.Parallel()
-	p, err := sqlflow.NewPool(t.TempDir(), embedFS(), newQuerier(), 1000, nil, 100*time.Millisecond)
+	p, err := sqlflow.NewPool(t.TempDir(), embedFS(), newQuerier(), 1000, 100*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1274,7 +1274,7 @@ func TestPool_InactivityReaper(t *testing.T) {
 
 func TestPool_InactivityReaper_ActiveNotEvicted(t *testing.T) {
 	t.Parallel()
-	p, err := sqlflow.NewPool(t.TempDir(), embedFS(), newQuerier(), 1000, nil, 200*time.Millisecond)
+	p, err := sqlflow.NewPool(t.TempDir(), embedFS(), newQuerier(), 1000, 200*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}

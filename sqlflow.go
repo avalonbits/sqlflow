@@ -1,4 +1,4 @@
-// Package sqlflow provides a generic, SQLite-backed storage layer built on top
+// Package sqlflow provides a SQLite-backed storage layer built on top
 // of database/sql. It wraps SQLite in WAL mode with separate read and write
 // connections, serialised writes, and exponential-backoff retry logic.
 //
@@ -12,6 +12,9 @@
 //     to its own SQLite file on disk. Connections are cached in a ristretto
 //     TinyLFU cache and closed gracefully when evicted. Use NewPool to create
 //     one, or TestPool in tests.
+//
+// All database access goes through Read and Write methods, that manage the transaction for
+// the callers.
 //
 // Both types have encrypted variants: use GetEncryptedDB/OpenEncryptedDB and
 // NewEncryptedPool instead of their plain counterparts. The jgiannuzzi fork of
@@ -55,8 +58,8 @@ type DBTX interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-// DB is a generic SQLite database handle parameterised by a per-transaction
-// accessor type Queries. It maintains two underlying sql.DB connections:
+// DB is a SQLite database handle parameterised by a per-transaction accessor type
+// Queries. It maintains two underlying sql.DB connections:
 //
 //   - wrdb: a single write connection (MaxOpenConns=1) with _txlock=immediate,
 //     serialised by a mutex so that only one writer can hold the SQLite WAL
@@ -87,8 +90,10 @@ type DB[Queries any] struct {
 }
 
 // TestDB creates an in-memory SQLite database, runs migrations from fsys, and
-// returns a DB ready for use in tests. Panics on any error so test setup stays
-// concise. fsys must contain the *.sql migration files at its root.
+// returns a DB ready for use in tests.
+//
+// Panics on any error so test setup stays concise.
+// fsys must contain the *.sql migration files at its root.
 func TestDB[Queries any](fsys fs.FS, querier Querier[Queries]) *DB[Queries] {
 	db, err := sql.Open("sqlite3", fmt.Sprintf(writeDSN, ":memory:"))
 	if err != nil {
@@ -105,8 +110,8 @@ func TestDB[Queries any](fsys fs.FS, querier Querier[Queries]) *DB[Queries] {
 }
 
 // GetDB opens (or creates) the SQLite database at dbName, runs all pending
-// migrations from fsys, and returns an open DB. fsys must contain the *.sql
-// migration files at its root.
+// migrations from fsys, and returns an open DB.
+// fsys must contain the *.sq; migration files at its root.
 func GetDB[Queries any](dbName string, fsys fs.FS, querier Querier[Queries]) (*DB[Queries], error) {
 	return getDB(dbName, fsys, querier, nil)
 }
@@ -240,8 +245,7 @@ func NoRows(err error) bool {
 }
 
 // ErrKeyNotAvailable is returned by an encrypted Pool when the data key for a
-// user is not in the in-memory key store (user not logged in, TTL expired, or
-// server restarted). The caller should re-authenticate to reload the key.
+// user is not in the in-memory key store.
 var ErrKeyNotAvailable = errors.New("data key not available")
 
 // Pool is a per-key connection pool backed by a ristretto cache with TinyLFU
@@ -277,12 +281,6 @@ type Pool[Queries any] struct {
 	reapCancel context.CancelFunc
 }
 
-// SetKeyProvider wires the data key lookup function into the pool. Must be
-// called before any Read/Write on the pool.
-func (p *Pool[Queries]) SetKeyProvider(fn func(string) ([]byte, bool)) {
-	p.keyProvider = fn
-}
-
 // Evict immediately removes the pool entry for userID from the cache, closing
 // the database once all in-flight operations finish. No-op if the entry is not
 // cached.
@@ -295,15 +293,33 @@ func (p *Pool[Queries]) Wait() {
 	p.cache.Wait()
 }
 
-// NewPool creates a Pool backed by on-disk SQLite databases. fsys must contain
-// the *.sql migration files at its root. maxCached controls the maximum number
-// of open databases kept in the cache (minimum 1000). inactivityTimeout, if
-// > 0, starts a background reaper that evicts entries idle for longer than the
-// timeout; pass 0 to disable. It ensures the directory exists and migrates all
-// existing databases. keyProvider, if non-nil, is set on the pool before
-// MigrateAll runs so that encrypted pools skip migration (per-DB migration is
-// lazy in getOrCreate).
+// NewPool creates a plain (unencrypted) Pool backed by on-disk SQLite
+// databases. fsys must contain the *.sql migration files at its root. maxCached
+// controls the maximum number of open databases kept in the cache (minimum
+// 1000). inactivityTimeout, if > 0, starts a background reaper that evicts
+// entries idle for longer than the timeout; pass 0 to disable.
 func NewPool[Queries any](
+	dir string, fsys fs.FS, querier Querier[Queries], maxCached int64,
+	inactivityTimeout time.Duration,
+) (*Pool[Queries], error) {
+	return newPool(dir, fsys, querier, maxCached, nil, inactivityTimeout)
+}
+
+// NewEncryptedPool creates a Pool where each database is encrypted with
+// SQLCipher. keyProvider is called with the pool key (e.g. user ID) each time
+// a database is opened; it must return the 32-byte encryption key and true, or
+// false if the key is unavailable (causing Read/Write to return
+// ErrKeyNotAvailable). Migration for encrypted databases is lazy: it runs on
+// first open when the data key is available.
+func NewEncryptedPool[Queries any](
+	dir string, fsys fs.FS, querier Querier[Queries], maxCached int64,
+	keyProvider func(string) ([]byte, bool),
+	inactivityTimeout time.Duration,
+) (*Pool[Queries], error) {
+	return newPool(dir, fsys, querier, maxCached, keyProvider, inactivityTimeout)
+}
+
+func newPool[Queries any](
 	dir string, fsys fs.FS, querier Querier[Queries], maxCached int64,
 	keyProvider func(string) ([]byte, bool),
 	inactivityTimeout time.Duration,
@@ -347,10 +363,11 @@ func NewPool[Queries any](
 	return p, nil
 }
 
-// TestPool returns a pool backed by dir for tests. Panics on error, matching
-// the TestDB convention. fsys must contain the *.sql migration files at its root.
+// TestPool returns a plain pool backed by dir for tests. Panics on error,
+// matching the TestDB convention. fsys must contain the *.sql migration files
+// at its root.
 func TestPool[Queries any](dir string, fsys fs.FS, querier Querier[Queries]) *Pool[Queries] {
-	p, err := NewPool(dir, fsys, querier, 100_000, nil, 0)
+	p, err := NewPool(dir, fsys, querier, 100_000, 0)
 	if err != nil {
 		panic(fmt.Sprintf("creating test pool: %v", err))
 	}
