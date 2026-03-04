@@ -11,6 +11,6 @@ func AcquireSharedLock(path string) (*os.File, error) {
 
 // WaitEviction calls p.Wait() to flush all pending ristretto OnExit callbacks.
 // Use immediately after Pool.Evict in tests to synchronise lock-file closure.
-func (p *Pool[Queries]) WaitEviction() {
+func (p *Pool[T]) WaitEviction() {
 	p.Wait()
 }
