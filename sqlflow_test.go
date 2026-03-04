@@ -17,17 +17,22 @@ import (
 	"github.com/avalonbits/sqlflow"
 )
 
-//go:embed testdata
-var testdataFS embed.FS
+//go:embed testdata/migrations
+var rawEmbedFS embed.FS
 
-// embedMigrations returns an EmbedMigrations value whose FS root contains
-// "migrations/" directly, by sub-rooting the embedded testdata FS.
-func embedMigrations() sqlflow.Migrations {
-	sub, err := fs.Sub(testdataFS, "testdata")
+// embedFS returns an fs.FS whose root is the migrations directory, suitable
+// for passing directly to sqlflow functions.
+func embedFS() fs.FS {
+	sub, err := fs.Sub(rawEmbedFS, "testdata/migrations")
 	if err != nil {
 		panic(err)
 	}
-	return sqlflow.EmbedMigrations(sub)
+	return sub
+}
+
+// dirFS returns an os.DirFS rooted at testdata/migrations.
+func dirFS() fs.FS {
+	return os.DirFS("testdata/migrations")
 }
 
 // kvQuerier is a stand-in for sqlc-generated code.
@@ -54,14 +59,14 @@ func newQuerier() sqlflow.Querier[kvQuerier] {
 
 type migrationCase struct {
 	name string
-	m    sqlflow.Migrations
+	fsys fs.FS
 }
 
 func bothMigrations(t *testing.T) []migrationCase {
 	t.Helper()
 	return []migrationCase{
-		{name: "embed", m: embedMigrations()},
-		{name: "dir", m: sqlflow.DirMigrations("testdata/migrations")},
+		{name: "embed", fsys: embedFS()},
+		{name: "dir", fsys: dirFS()},
 	}
 }
 
@@ -69,7 +74,7 @@ func bothMigrations(t *testing.T) []migrationCase {
 
 func TestEmbedMigrations(t *testing.T) {
 	t.Parallel()
-	db := sqlflow.TestDB(embedMigrations(), newQuerier())
+	db := sqlflow.TestDB(embedFS(), newQuerier())
 	defer db.Close()
 	ctx := context.Background()
 	if err := db.Write(ctx, func(q *kvQuerier) error { return q.Set(ctx, "k", "v") }); err != nil {
@@ -90,7 +95,7 @@ func TestEmbedMigrations(t *testing.T) {
 
 func TestDirMigrations(t *testing.T) {
 	t.Parallel()
-	db := sqlflow.TestDB(sqlflow.DirMigrations("testdata/migrations"), newQuerier())
+	db := sqlflow.TestDB(dirFS(), newQuerier())
 	defer db.Close()
 	ctx := context.Background()
 	if err := db.Write(ctx, func(q *kvQuerier) error { return q.Set(ctx, "k", "v") }); err != nil {
@@ -112,13 +117,13 @@ func TestDirMigrations(t *testing.T) {
 func TestDirMigrations_BadPath(t *testing.T) {
 	t.Parallel()
 	for _, mc := range []migrationCase{
-		{name: "embed", m: sqlflow.EmbedMigrations(embed.FS{})},
-		{name: "dir", m: sqlflow.DirMigrations("/nonexistent/path/that/does/not/exist")},
+		{name: "embed", fsys: embed.FS{}},
+		{name: "dir", fsys: os.DirFS("/nonexistent/path/that/does/not/exist")},
 	} {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
-			_, err := sqlflow.GetDB(filepath.Join(dir, "test.db"), mc.m, newQuerier())
+			_, err := sqlflow.GetDB(filepath.Join(dir, "test.db"), mc.fsys, newQuerier())
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -133,7 +138,7 @@ func TestTestDB(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			db := sqlflow.TestDB(mc.m, newQuerier())
+			db := sqlflow.TestDB(mc.fsys, newQuerier())
 			defer db.Close()
 			ctx := context.Background()
 			if err := db.Write(ctx, func(q *kvQuerier) error { return q.Set(ctx, "hello", "world") }); err != nil {
@@ -157,8 +162,8 @@ func TestTestDB(t *testing.T) {
 func TestTestDB_Panic(t *testing.T) {
 	t.Parallel()
 	for _, mc := range []migrationCase{
-		{name: "embed", m: sqlflow.EmbedMigrations(embed.FS{})},
-		{name: "dir", m: sqlflow.DirMigrations("/nonexistent/path")},
+		{name: "embed", fsys: embed.FS{}},
+		{name: "dir", fsys: os.DirFS("/nonexistent/path")},
 	} {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
@@ -167,7 +172,7 @@ func TestTestDB_Panic(t *testing.T) {
 					t.Fatal("expected panic, got none")
 				}
 			}()
-			sqlflow.TestDB(mc.m, newQuerier())
+			sqlflow.TestDB(mc.fsys, newQuerier())
 		})
 	}
 }
@@ -179,7 +184,7 @@ func TestGetDB(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			db, err := sqlflow.GetDB(filepath.Join(t.TempDir(), "test.db"), mc.m, newQuerier())
+			db, err := sqlflow.GetDB(filepath.Join(t.TempDir(), "test.db"), mc.fsys, newQuerier())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -209,7 +214,7 @@ func TestGetDB_CreatesDir(t *testing.T) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "sub", "nested", "test.db")
-			db, err := sqlflow.GetDB(path, mc.m, newQuerier())
+			db, err := sqlflow.GetDB(path, mc.fsys, newQuerier())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -227,7 +232,7 @@ func TestGetDB_RunsMigrations(t *testing.T) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "test.db")
-			db, err := sqlflow.GetDB(path, mc.m, newQuerier())
+			db, err := sqlflow.GetDB(path, mc.fsys, newQuerier())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -252,12 +257,12 @@ func TestGetDB_Idempotent(t *testing.T) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "test.db")
-			db, err := sqlflow.GetDB(path, mc.m, newQuerier())
+			db, err := sqlflow.GetDB(path, mc.fsys, newQuerier())
 			if err != nil {
 				t.Fatal(err)
 			}
 			db.Close()
-			db2, err := sqlflow.GetDB(path, mc.m, newQuerier())
+			db2, err := sqlflow.GetDB(path, mc.fsys, newQuerier())
 			if err != nil {
 				t.Fatalf("second GetDB failed: %v", err)
 			}
@@ -277,7 +282,7 @@ func TestGetDB_BadPath(t *testing.T) {
 			if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			_, err := sqlflow.GetDB(filepath.Join(blocker, "test.db"), mc.m, newQuerier())
+			_, err := sqlflow.GetDB(filepath.Join(blocker, "test.db"), mc.fsys, newQuerier())
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -297,7 +302,7 @@ func TestGetEncryptedDB(t *testing.T) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "enc.db")
-			db, err := sqlflow.GetEncryptedDB(path, mc.m, newQuerier(), key)
+			db, err := sqlflow.GetEncryptedDB(path, mc.fsys, newQuerier(), key)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -335,12 +340,12 @@ func TestGetEncryptedDB_WrongKey(t *testing.T) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "enc.db")
-			db, err := sqlflow.GetEncryptedDB(path, mc.m, newQuerier(), goodKey)
+			db, err := sqlflow.GetEncryptedDB(path, mc.fsys, newQuerier(), goodKey)
 			if err != nil {
 				t.Fatal(err)
 			}
 			db.Close()
-			db2, err := sqlflow.OpenEncryptedDB(path, mc.m, newQuerier(), badKey)
+			db2, err := sqlflow.OpenEncryptedDB(path, mc.fsys, newQuerier(), badKey)
 			if err != nil {
 				// Some implementations fail at open time.
 				return
@@ -365,7 +370,7 @@ func TestGetEncryptedDB_CreatesDir(t *testing.T) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "sub", "enc.db")
-			db, err := sqlflow.GetEncryptedDB(path, mc.m, newQuerier(), key)
+			db, err := sqlflow.GetEncryptedDB(path, mc.fsys, newQuerier(), key)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -385,7 +390,7 @@ func TestOpenDB_NewFile(t *testing.T) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "new.db")
-			db, err := sqlflow.OpenDB(path, mc.m, newQuerier())
+			db, err := sqlflow.OpenDB(path, mc.fsys, newQuerier())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -415,12 +420,12 @@ func TestOpenDB_ExistingFile(t *testing.T) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "existing.db")
-			db, err := sqlflow.GetDB(path, mc.m, newQuerier())
+			db, err := sqlflow.GetDB(path, mc.fsys, newQuerier())
 			if err != nil {
 				t.Fatal(err)
 			}
 			db.Close()
-			db2, err := sqlflow.OpenDB(path, mc.m, newQuerier())
+			db2, err := sqlflow.OpenDB(path, mc.fsys, newQuerier())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -450,13 +455,13 @@ func TestOpenDB_SkipsMigration(t *testing.T) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "skip.db")
-			db, err := sqlflow.GetDB(path, mc.m, newQuerier())
+			db, err := sqlflow.GetDB(path, mc.fsys, newQuerier())
 			if err != nil {
 				t.Fatal(err)
 			}
 			db.Close()
 			// OpenDB on existing file must succeed even with a bad migrations value.
-			badM := sqlflow.DirMigrations("/nonexistent")
+			badM := os.DirFS("/nonexistent")
 			db2, err := sqlflow.OpenDB(path, badM, newQuerier())
 			if err != nil {
 				t.Fatalf("OpenDB should skip migration for existing file: %v", err)
@@ -478,7 +483,7 @@ func TestOpenEncryptedDB_NewFile(t *testing.T) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "new_enc.db")
-			db, err := sqlflow.OpenEncryptedDB(path, mc.m, newQuerier(), key)
+			db, err := sqlflow.OpenEncryptedDB(path, mc.fsys, newQuerier(), key)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -512,12 +517,12 @@ func TestOpenEncryptedDB_ExistingFile(t *testing.T) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "enc_exist.db")
-			db, err := sqlflow.GetEncryptedDB(path, mc.m, newQuerier(), key)
+			db, err := sqlflow.GetEncryptedDB(path, mc.fsys, newQuerier(), key)
 			if err != nil {
 				t.Fatal(err)
 			}
 			db.Close()
-			db2, err := sqlflow.OpenEncryptedDB(path, mc.m, newQuerier(), key)
+			db2, err := sqlflow.OpenEncryptedDB(path, mc.fsys, newQuerier(), key)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -555,12 +560,12 @@ func TestOpenEncryptedDB_WrongKey(t *testing.T) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "enc_bad.db")
-			db, err := sqlflow.GetEncryptedDB(path, mc.m, newQuerier(), goodKey)
+			db, err := sqlflow.GetEncryptedDB(path, mc.fsys, newQuerier(), goodKey)
 			if err != nil {
 				t.Fatal(err)
 			}
 			db.Close()
-			db2, err := sqlflow.OpenEncryptedDB(path, mc.m, newQuerier(), badKey)
+			db2, err := sqlflow.OpenEncryptedDB(path, mc.fsys, newQuerier(), badKey)
 			if err != nil {
 				return
 			}
@@ -584,7 +589,7 @@ func TestDB_WriteRead(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			db := sqlflow.TestDB(mc.m, newQuerier())
+			db := sqlflow.TestDB(mc.fsys, newQuerier())
 			defer db.Close()
 			ctx := context.Background()
 			pairs := [][2]string{{"a", "1"}, {"b", "2"}, {"c", "3"}}
@@ -615,7 +620,7 @@ func TestDB_WriteOverwrite(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			db := sqlflow.TestDB(mc.m, newQuerier())
+			db := sqlflow.TestDB(mc.fsys, newQuerier())
 			defer db.Close()
 			ctx := context.Background()
 			if err := db.Write(ctx, func(q *kvQuerier) error { return q.Set(ctx, "k", "first") }); err != nil {
@@ -644,7 +649,7 @@ func TestDB_Read_NotFound(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			db := sqlflow.TestDB(mc.m, newQuerier())
+			db := sqlflow.TestDB(mc.fsys, newQuerier())
 			defer db.Close()
 			ctx := context.Background()
 			err := db.Read(ctx, func(q *kvQuerier) error {
@@ -663,7 +668,7 @@ func TestDB_ConcurrentReads(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			db := sqlflow.TestDB(mc.m, newQuerier())
+			db := sqlflow.TestDB(mc.fsys, newQuerier())
 			defer db.Close()
 			ctx := context.Background()
 			if err := db.Write(ctx, func(q *kvQuerier) error { return q.Set(ctx, "k", "v") }); err != nil {
@@ -695,13 +700,12 @@ func TestDB_ConcurrentWrites(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			db := sqlflow.TestDB(mc.m, newQuerier())
+			db := sqlflow.TestDB(mc.fsys, newQuerier())
 			defer db.Close()
 			ctx := context.Background()
 			var wg sync.WaitGroup
 			errs := make(chan error, 50)
 			for i := range 50 {
-				i := i
 				wg.Go(func() {
 					key := fmt.Sprintf("key%d", i)
 					errs <- db.Write(ctx, func(q *kvQuerier) error { return q.Set(ctx, key, "v") })
@@ -715,7 +719,6 @@ func TestDB_ConcurrentWrites(t *testing.T) {
 				}
 			}
 			for i := range 50 {
-				i := i
 				var got string
 				if err := db.Read(ctx, func(q *kvQuerier) error {
 					var err error
@@ -736,7 +739,7 @@ func TestDB_ConcurrentReadWrite(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			db := sqlflow.TestDB(mc.m, newQuerier())
+			db := sqlflow.TestDB(mc.fsys, newQuerier())
 			defer db.Close()
 			ctx := context.Background()
 			if err := db.Write(ctx, func(q *kvQuerier) error { return q.Set(ctx, "shared", "init") }); err != nil {
@@ -753,7 +756,6 @@ func TestDB_ConcurrentReadWrite(t *testing.T) {
 				})
 			}
 			for i := range 25 {
-				i := i
 				wg.Go(func() {
 					errs <- db.Write(ctx, func(q *kvQuerier) error {
 						return q.Set(ctx, fmt.Sprintf("w%d", i), "v")
@@ -776,7 +778,7 @@ func TestDB_Write_ContextCancel(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			db := sqlflow.TestDB(mc.m, newQuerier())
+			db := sqlflow.TestDB(mc.fsys, newQuerier())
 			defer db.Close()
 			ctx := context.Background()
 			ready := make(chan struct{})
@@ -803,7 +805,7 @@ func TestDB_Write_FuncError(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			db := sqlflow.TestDB(mc.m, newQuerier())
+			db := sqlflow.TestDB(mc.fsys, newQuerier())
 			defer db.Close()
 			ctx := context.Background()
 			sentinel := errors.New("function error")
@@ -820,7 +822,7 @@ func TestDB_Write_Rollback(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			db := sqlflow.TestDB(mc.m, newQuerier())
+			db := sqlflow.TestDB(mc.fsys, newQuerier())
 			defer db.Close()
 			ctx := context.Background()
 			db.Write(ctx, func(q *kvQuerier) error { //nolint
@@ -845,14 +847,13 @@ func TestDB_Checkpoint(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			db, err := sqlflow.GetDB(filepath.Join(t.TempDir(), "ckpt.db"), mc.m, newQuerier())
+			db, err := sqlflow.GetDB(filepath.Join(t.TempDir(), "ckpt.db"), mc.fsys, newQuerier())
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer db.Close()
 			ctx := context.Background()
 			for i := range 5 {
-				i := i
 				db.Write(ctx, func(q *kvQuerier) error { //nolint
 					return q.Set(ctx, fmt.Sprintf("k%d", i), "v")
 				})
@@ -869,7 +870,7 @@ func TestDB_Checkpoint_CancelledCtx(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			db, err := sqlflow.GetDB(filepath.Join(t.TempDir(), "ckpt2.db"), mc.m, newQuerier())
+			db, err := sqlflow.GetDB(filepath.Join(t.TempDir(), "ckpt2.db"), mc.fsys, newQuerier())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -890,7 +891,7 @@ func TestDB_Close(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			db := sqlflow.TestDB(mc.m, newQuerier())
+			db := sqlflow.TestDB(mc.fsys, newQuerier())
 			if err := db.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -911,7 +912,7 @@ func TestDB_Close_Idempotent(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			db := sqlflow.TestDB(mc.m, newQuerier())
+			db := sqlflow.TestDB(mc.fsys, newQuerier())
 			db.Close() //nolint
 			// Second close should not panic.
 			_ = db.Close()
@@ -944,7 +945,7 @@ func TestTestPool(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			p := sqlflow.TestPool(t.TempDir(), mc.m, newQuerier())
+			p := sqlflow.TestPool(t.TempDir(), mc.fsys, newQuerier())
 			defer p.Close()
 			ctx := context.Background()
 			if err := p.Write(ctx, "alice", func(q *kvQuerier) error { return q.Set(ctx, "k", "v") }); err != nil {
@@ -971,7 +972,7 @@ func TestNewPool_CreatesDir(t *testing.T) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
 			dir := filepath.Join(t.TempDir(), "sub", "pool")
-			p, err := sqlflow.NewPool(dir, mc.m, newQuerier(), 1000, nil, 0)
+			p, err := sqlflow.NewPool(dir, mc.fsys, newQuerier(), 1000, nil, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1000,7 +1001,7 @@ func TestNewPool_MigratesExistingDBs(t *testing.T) {
 			}
 			rawDB.Close()
 
-			p, err := sqlflow.NewPool(dir, mc.m, newQuerier(), 1000, nil, 0)
+			p, err := sqlflow.NewPool(dir, mc.fsys, newQuerier(), 1000, nil, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1023,7 +1024,7 @@ func TestNewPool_BadDir(t *testing.T) {
 			if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			_, err := sqlflow.NewPool(filepath.Join(blocker, "pool"), mc.m, newQuerier(), 1000, nil, 0)
+			_, err := sqlflow.NewPool(filepath.Join(blocker, "pool"), mc.fsys, newQuerier(), 1000, nil, 0)
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -1034,8 +1035,8 @@ func TestNewPool_BadDir(t *testing.T) {
 func TestNewPool_BadMigration(t *testing.T) {
 	t.Parallel()
 	for _, mc := range []migrationCase{
-		{name: "embed", m: sqlflow.EmbedMigrations(embed.FS{})},
-		{name: "dir", m: sqlflow.DirMigrations("/nonexistent")},
+		{name: "embed", fsys: embed.FS{}},
+		{name: "dir", fsys: os.DirFS("/nonexistent")},
 	} {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1049,7 +1050,7 @@ func TestNewPool_BadMigration(t *testing.T) {
 				t.Fatal(err)
 			}
 			rawDB.Close()
-			_, err = sqlflow.NewPool(dir, mc.m, newQuerier(), 1000, nil, 0)
+			_, err = sqlflow.NewPool(dir, mc.fsys, newQuerier(), 1000, nil, 0)
 			if err == nil {
 				t.Fatal("expected error with bad migration, got nil")
 			}
@@ -1064,7 +1065,7 @@ func TestPool_WriteRead(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			p := sqlflow.TestPool(t.TempDir(), mc.m, newQuerier())
+			p := sqlflow.TestPool(t.TempDir(), mc.fsys, newQuerier())
 			defer p.Close()
 			ctx := context.Background()
 			keys := []string{"alice", "bob", "carol"}
@@ -1095,7 +1096,7 @@ func TestPool_IsolatedKeys(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			p := sqlflow.TestPool(t.TempDir(), mc.m, newQuerier())
+			p := sqlflow.TestPool(t.TempDir(), mc.fsys, newQuerier())
 			defer p.Close()
 			ctx := context.Background()
 			p.Write(ctx, "alice", func(q *kvQuerier) error { return q.Set(ctx, "who", "A") }) //nolint
@@ -1118,14 +1119,13 @@ func TestPool_ConcurrentAccess(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			p := sqlflow.TestPool(t.TempDir(), mc.m, newQuerier())
+			p := sqlflow.TestPool(t.TempDir(), mc.fsys, newQuerier())
 			defer p.Close()
 			ctx := context.Background()
 			poolKeys := []string{"u1", "u2", "u3", "u4", "u5"}
 			var wg sync.WaitGroup
 			errs := make(chan error, 60)
 			for i := range 30 {
-				i := i
 				wg.Go(func() {
 					k := poolKeys[i%len(poolKeys)]
 					if i%2 == 0 {
@@ -1151,7 +1151,7 @@ func TestPool_Write_FuncError(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			p := sqlflow.TestPool(t.TempDir(), mc.m, newQuerier())
+			p := sqlflow.TestPool(t.TempDir(), mc.fsys, newQuerier())
 			defer p.Close()
 			ctx := context.Background()
 			sentinel := errors.New("pool write error")
@@ -1168,7 +1168,7 @@ func TestPool_Read_NotFound(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			p := sqlflow.TestPool(t.TempDir(), mc.m, newQuerier())
+			p := sqlflow.TestPool(t.TempDir(), mc.fsys, newQuerier())
 			defer p.Close()
 			ctx := context.Background()
 			err := p.Read(ctx, "alice", func(q *kvQuerier) error {
@@ -1188,7 +1188,7 @@ func TestPool_KeyNotAvailable(t *testing.T) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
 			p, err := sqlflow.NewPool(
-				t.TempDir(), mc.m, newQuerier(), 1000,
+				t.TempDir(), mc.fsys, newQuerier(), 1000,
 				func(string) ([]byte, bool) { return nil, false },
 				0,
 			)
@@ -1212,7 +1212,7 @@ func TestPool_Evict(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			p := sqlflow.TestPool(t.TempDir(), mc.m, newQuerier())
+			p := sqlflow.TestPool(t.TempDir(), mc.fsys, newQuerier())
 			defer p.Close()
 			ctx := context.Background()
 			if err := p.Write(ctx, "alice", func(q *kvQuerier) error { return q.Set(ctx, "k", "v") }); err != nil {
@@ -1232,7 +1232,7 @@ func TestPool_Evict_WhileInFlight(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			p := sqlflow.TestPool(t.TempDir(), mc.m, newQuerier())
+			p := sqlflow.TestPool(t.TempDir(), mc.fsys, newQuerier())
 			defer p.Close()
 			ctx := context.Background()
 			started := make(chan struct{})
@@ -1258,7 +1258,7 @@ func TestPool_Evict_NonExistent(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			p := sqlflow.TestPool(t.TempDir(), mc.m, newQuerier())
+			p := sqlflow.TestPool(t.TempDir(), mc.fsys, newQuerier())
 			defer p.Close()
 			// Should not panic.
 			p.Evict("nobody")
@@ -1284,7 +1284,7 @@ func TestPool_MigrateAll(t *testing.T) {
 				}
 				rawDB.Close()
 			}
-			p, err := sqlflow.NewPool(dir, mc.m, newQuerier(), 1000, nil, 0)
+			p, err := sqlflow.NewPool(dir, mc.fsys, newQuerier(), 1000, nil, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1310,7 +1310,7 @@ func TestPool_MigrateAll_SkipsForEncrypted(t *testing.T) {
 				key[i] = byte(i + 1)
 			}
 			p, err := sqlflow.NewPool(
-				dir, mc.m, newQuerier(), 1000,
+				dir, mc.fsys, newQuerier(), 1000,
 				func(string) ([]byte, bool) { return key, true },
 				0,
 			)
@@ -1333,7 +1333,7 @@ func TestPool_ListKeys(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			p := sqlflow.TestPool(t.TempDir(), mc.m, newQuerier())
+			p := sqlflow.TestPool(t.TempDir(), mc.fsys, newQuerier())
 			defer p.Close()
 			ctx := context.Background()
 			for _, k := range []string{"alice", "bob", "carol"} {
@@ -1364,7 +1364,7 @@ func TestPool_ListKeys_Empty(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			p := sqlflow.TestPool(t.TempDir(), mc.m, newQuerier())
+			p := sqlflow.TestPool(t.TempDir(), mc.fsys, newQuerier())
 			defer p.Close()
 			keys, err := p.ListKeys()
 			if err != nil {
@@ -1384,7 +1384,7 @@ func TestPool_InactivityReaper(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			p, err := sqlflow.NewPool(t.TempDir(), mc.m, newQuerier(), 1000, nil, 100*time.Millisecond)
+			p, err := sqlflow.NewPool(t.TempDir(), mc.fsys, newQuerier(), 1000, nil, 100*time.Millisecond)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1407,7 +1407,7 @@ func TestPool_InactivityReaper_ActiveNotEvicted(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			p, err := sqlflow.NewPool(t.TempDir(), mc.m, newQuerier(), 1000, nil, 200*time.Millisecond)
+			p, err := sqlflow.NewPool(t.TempDir(), mc.fsys, newQuerier(), 1000, nil, 200*time.Millisecond)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1415,7 +1415,6 @@ func TestPool_InactivityReaper_ActiveNotEvicted(t *testing.T) {
 			ctx := context.Background()
 			// Keep the entry active by writing every 50ms for 400ms.
 			for i := range 8 {
-				i := i
 				if err := p.Write(ctx, "active", func(q *kvQuerier) error {
 					return q.Set(ctx, "n", fmt.Sprintf("%d", i))
 				}); err != nil {
@@ -1441,7 +1440,7 @@ func TestPool_Close(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			p := sqlflow.TestPool(t.TempDir(), mc.m, newQuerier())
+			p := sqlflow.TestPool(t.TempDir(), mc.fsys, newQuerier())
 			ctx := context.Background()
 			p.Write(ctx, "alice", func(q *kvQuerier) error { return q.Set(ctx, "k", "v") }) //nolint
 			if err := p.Close(); err != nil {
@@ -1456,7 +1455,7 @@ func TestPool_Close_DrainsInFlight(t *testing.T) {
 	for _, mc := range bothMigrations(t) {
 		t.Run(mc.name, func(t *testing.T) {
 			t.Parallel()
-			p := sqlflow.TestPool(t.TempDir(), mc.m, newQuerier())
+			p := sqlflow.TestPool(t.TempDir(), mc.fsys, newQuerier())
 			ctx := context.Background()
 			started := make(chan struct{})
 			writeErr := make(chan error, 1)
