@@ -42,12 +42,6 @@ import (
 	sqlite3lib "github.com/mattn/go-sqlite3"
 )
 
-// Evicter is implemented by any pool that can evict a single user's cached
-// database entry on demand (e.g. on logout or inactivity).
-type Evicter interface {
-	Evict(userID string)
-}
-
 // Querier is a function that builds a per-transaction accessor of type Queries from
 // a DBTX. It is called once per transaction inside Read and Write.
 type Querier[Queries any] func(tx DBTX) *Queries
