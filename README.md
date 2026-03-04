@@ -63,6 +63,8 @@ func main() {
 	fmt.Println(val) // world
 }
 
+// migrations is an in-memory goose migration set. In production use
+// //go:embed with fs.Sub, or os.DirFS, to point at real .sql files.
 var migrations = fstest.MapFS{
 	"001_init.sql": {Data: []byte(`-- +goose Up
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, val TEXT NOT NULL);
@@ -70,8 +72,12 @@ CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, val TEXT NOT NULL);
 DROP TABLE kv;`)},
 }
 
+// kvStore wraps a DBTX to provide typed query methods for the kv table.
 type kvStore struct{ db sqlflow.DBTX }
 
+// newKV is a sqlflow.Querier: sqlflow calls it with the transaction's
+// connection so every method on kvStore automatically runs within that
+// transaction — no connection is ever passed around manually.
 func newKV(db sqlflow.DBTX) *kvStore { return &kvStore{db: db} }
 
 func (s *kvStore) Set(ctx context.Context, key, val string) error {
@@ -142,6 +148,8 @@ func main() {
 	fmt.Println(val) // value
 }
 
+// migrations is an in-memory goose migration set. In production use
+// //go:embed with fs.Sub, or os.DirFS, to point at real .sql files.
 var migrations = fstest.MapFS{
 	"001_init.sql": {Data: []byte(`-- +goose Up
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, val TEXT NOT NULL);
@@ -149,8 +157,12 @@ CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, val TEXT NOT NULL);
 DROP TABLE kv;`)},
 }
 
+// kvStore wraps a DBTX to provide typed query methods for the kv table.
 type kvStore struct{ db sqlflow.DBTX }
 
+// newKV is a sqlflow.Querier: sqlflow calls it with the transaction's
+// connection so every method on kvStore automatically runs within that
+// transaction — no connection is ever passed around manually.
 func newKV(db sqlflow.DBTX) *kvStore { return &kvStore{db: db} }
 
 func (s *kvStore) Set(ctx context.Context, key, val string) error {
@@ -230,6 +242,8 @@ func main() {
 	// carol → hello carol
 }
 
+// migrations is an in-memory goose migration set. In production use
+// //go:embed with fs.Sub, or os.DirFS, to point at real .sql files.
 var migrations = fstest.MapFS{
 	"001_init.sql": {Data: []byte(`-- +goose Up
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, val TEXT NOT NULL);
@@ -237,8 +251,12 @@ CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, val TEXT NOT NULL);
 DROP TABLE kv;`)},
 }
 
+// kvStore wraps a DBTX to provide typed query methods for the kv table.
 type kvStore struct{ db sqlflow.DBTX }
 
+// newKV is a sqlflow.Querier: sqlflow calls it with the transaction's
+// connection so every method on kvStore automatically runs within that
+// transaction — no connection is ever passed around manually.
 func newKV(db sqlflow.DBTX) *kvStore { return &kvStore{db: db} }
 
 func (s *kvStore) Set(ctx context.Context, key, val string) error {
@@ -333,6 +351,8 @@ func main() {
 	// carol → data for carol
 }
 
+// migrations is an in-memory goose migration set. In production use
+// //go:embed with fs.Sub, or os.DirFS, to point at real .sql files.
 var migrations = fstest.MapFS{
 	"001_init.sql": {Data: []byte(`-- +goose Up
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, val TEXT NOT NULL);
@@ -340,8 +360,12 @@ CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, val TEXT NOT NULL);
 DROP TABLE kv;`)},
 }
 
+// kvStore wraps a DBTX to provide typed query methods for the kv table.
 type kvStore struct{ db sqlflow.DBTX }
 
+// newKV is a sqlflow.Querier: sqlflow calls it with the transaction's
+// connection so every method on kvStore automatically runs within that
+// transaction — no connection is ever passed around manually.
 func newKV(db sqlflow.DBTX) *kvStore { return &kvStore{db: db} }
 
 func (s *kvStore) Set(ctx context.Context, key, val string) error {
