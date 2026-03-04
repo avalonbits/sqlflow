@@ -3,9 +3,7 @@
 A SQLite-backed storage layer for Go. It wraps SQLite in WAL mode
 with separate read/write connections, serialised writes with exponential-backoff
 retries, and an optional per-key connection pool backed by a TinyLFU cache.
-
-Encryption is supported via the [jgiannuzzi/go-sqlite3](https://github.com/jgiannuzzi/go-sqlite3)
-fork, which adds SQLCipher support through DSN parameters.
+At-rest encryption is supported via SQLCipher.
 
 ## Installation
 
@@ -15,6 +13,23 @@ go get github.com/avalonbits/sqlflow
 
 Because sqlflow uses cgo (via go-sqlite3), you need a C compiler available at
 build time.
+
+## Encryption
+
+sqlflow supports at-rest encryption through [SQLCipher](https://www.zetetic.net/sqlcipher/),
+a SQLite extension that encrypts the entire database file with AES-256.
+
+To enable it, replace the standard `go-sqlite3` driver with the
+[jgiannuzzi/go-sqlite3](https://github.com/jgiannuzzi/go-sqlite3) fork in your
+`go.mod`:
+
+```
+replace github.com/mattn/go-sqlite3 => github.com/jgiannuzzi/go-sqlite3 v1.14.35-0.20260227142656-2c447b9a2806
+```
+
+Then use `GetEncryptedDB` / `OpenEncryptedDB` (single database) or pass a
+`keyProvider` to `NewPool` (per-key pool). Both accept a 32-byte key; sqlflow
+passes it to the driver via DSN parameters at open time.
 
 ## Examples
 
