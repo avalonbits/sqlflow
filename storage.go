@@ -82,6 +82,7 @@ func GetDB[Queries any](
 
 	if err := migrate(db, migrations); err != nil {
 		db.Close()
+
 		return nil, err
 	}
 	db.Close()
@@ -99,33 +100,8 @@ func OpenDB[Queries any](
 		// File doesn't exist — new DB, must create and migrate.
 		return GetDB(dbName, migrations, factory, key)
 	}
+
 	return openDBConns(dbName, factory, key)
-}
-
-func openDBConns[Queries any](dbName string, factory func(tx DBTX) *Queries, key []byte) (*DB[Queries], error) {
-	var rDSN, wDSN string
-
-	if len(key) > 0 {
-		wDSN = cipherWriteDSNFor(dbName, key)
-		rDSN = cipherReadDSNFor(dbName, key)
-	} else {
-		wDSN = fmt.Sprintf(writeDSN, dbName)
-		rDSN = fmt.Sprintf(readDSN, dbName)
-	}
-
-	wrdb, err := sql.Open("sqlite3", wDSN)
-	if err != nil {
-		return nil, err
-	}
-	wrdb.SetMaxOpenConns(1)
-
-	rddb, err := sql.Open("sqlite3", rDSN)
-	if err != nil {
-		wrdb.Close()
-		return nil, err
-	}
-
-	return &DB[Queries]{factory: factory, rddb: rddb, mu: &sync.Mutex{}, wrdb: wrdb, backoffRetries: 5}, nil
 }
 
 func (db *DB[Queries]) RDBMS() *sql.DB {
@@ -142,7 +118,9 @@ func (db *DB[Queries]) Close() error {
 func (db *DB[Queries]) Checkpoint(ctx context.Context) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+
 	_, err := db.wrdb.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+
 	return err
 }
 
@@ -259,9 +237,11 @@ func NewPool[Queries any](
 		inactivityTimeout: inactivityTimeout,
 		reapCancel:        cancel,
 	}
+
 	cache, err := newPoolCache[Queries](maxCached)
 	if err != nil {
 		cancel()
+
 		return nil, fmt.Errorf("creating pool cache: %w", err)
 	}
 	p.cache = cache
@@ -269,6 +249,7 @@ func NewPool[Queries any](
 	if err := p.MigrateAll(); err != nil {
 		cancel()
 		p.cache.Close()
+
 		return nil, fmt.Errorf("migrating existing databases: %w", err)
 	}
 
@@ -330,6 +311,7 @@ func (p *Pool[Queries]) MigrateAll() error {
 		}
 		if err := migrate(db, p.migrations); err != nil {
 			db.Close()
+
 			return fmt.Errorf("migrating %s: %w", path, err)
 		}
 		db.Close()
@@ -351,6 +333,7 @@ func (p *Pool[Queries]) ListKeys() ([]string, error) {
 		key := strings.TrimSuffix(filepath.Base(path), ".db")
 		keys = append(keys, key)
 	}
+
 	return keys, nil
 }
 
@@ -372,11 +355,39 @@ func (p *Pool[Queries]) Close() error {
 				entry.lockFile.Close()
 			}
 		})
+
 		return false
 	})
 	p.cache.Close()
 
 	return errors.Join(errs...)
+}
+
+func openDBConns[Queries any](dbName string, factory func(tx DBTX) *Queries, key []byte) (*DB[Queries], error) {
+	var rDSN, wDSN string
+
+	if len(key) > 0 {
+		wDSN = cipherWriteDSNFor(dbName, key)
+		rDSN = cipherReadDSNFor(dbName, key)
+	} else {
+		wDSN = fmt.Sprintf(writeDSN, dbName)
+		rDSN = fmt.Sprintf(readDSN, dbName)
+	}
+
+	wrdb, err := sql.Open("sqlite3", wDSN)
+	if err != nil {
+		return nil, err
+	}
+	wrdb.SetMaxOpenConns(1)
+
+	rddb, err := sql.Open("sqlite3", rDSN)
+	if err != nil {
+		wrdb.Close()
+
+		return nil, err
+	}
+
+	return &DB[Queries]{factory: factory, rddb: rddb, mu: &sync.Mutex{}, wrdb: wrdb, backoffRetries: 5}, nil
 }
 
 // runInactivityReaper periodically evicts pool entries that have been idle
@@ -406,6 +417,7 @@ func (p *Pool[Queries]) reapInactive() {
 		if entry.refs.Load() == 0 && entry.lastActivity.Load() < cutoff {
 			toEvict = append(toEvict, entry.key)
 		}
+
 		return false
 	})
 	for _, key := range toEvict {
@@ -424,6 +436,7 @@ func (p *Pool[Queries]) acquire(key string) (*poolEntry[Queries], error) {
 		}
 		if entry.acquire() {
 			entry.lastActivity.Store(time.Now().UnixNano())
+
 			return entry, nil
 		}
 		// Entry is closing (evicted). Loop to create a replacement.
@@ -464,6 +477,7 @@ func (p *Pool[Queries]) getOrCreate(key string) (*poolEntry[Queries], error) {
 		lf, lerr := acquireLockFn(dbPath + ".lock")
 		if lerr != nil {
 			newDB.Close()
+
 			return nil, fmt.Errorf("acquiring shared lock for %q: %w", key, lerr)
 		}
 		lockFile = lf
@@ -499,8 +513,10 @@ func (e *poolEntry[Queries]) acquire() bool {
 	e.refs.Add(1)
 	if e.closing.Load() {
 		e.release()
+
 		return false
 	}
+
 	return true
 }
 
