@@ -142,13 +142,6 @@ func OpenDB[Queries any](dbName string, migrations embed.FS, querier Querier[Que
 	return openDBConns(dbName, querier, key)
 }
 
-// RDBMS returns the underlying write *sql.DB. Use this only when direct
-// database access is needed outside the Read/Write transaction helpers (e.g.
-// for PRAGMA statements or schema inspection).
-func (db *DB[Queries]) RDBMS() *sql.DB {
-	return db.wrdb
-}
-
 // Close closes both the read and write database connections. It waits for any
 // in-flight operations to complete before returning.
 func (db *DB[Queries]) Close() error {
