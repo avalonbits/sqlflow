@@ -1,6 +1,6 @@
 # sqlflow
 
-A generic, SQLite-backed storage layer for Go. It wraps SQLite in WAL mode
+A SQLite-backed storage layer for Go. It wraps SQLite in WAL mode
 with separate read/write connections, serialised writes with exponential-backoff
 retries, and an optional per-key connection pool backed by a TinyLFU cache.
 
@@ -15,13 +15,6 @@ go get github.com/avalonbits/sqlflow
 
 Because sqlflow uses cgo (via go-sqlite3), you need a C compiler available at
 build time.
-
-The SQLCipher-encrypted variants require the jgiannuzzi fork. Add this to your
-`go.mod`:
-
-```
-replace github.com/mattn/go-sqlite3 => github.com/jgiannuzzi/go-sqlite3 v1.14.35-0.20260227142656-2c447b9a2806
-```
 
 ## Concepts
 
@@ -107,6 +100,14 @@ err := db.Write(ctx, func(q *Queries) error {
 ```
 
 ### Encrypted database
+
+The SQLCipher-encrypted variants require the jgiannuzzi fork. Add this to your
+`go.mod`:
+
+```
+replace github.com/mattn/go-sqlite3 => github.com/jgiannuzzi/go-sqlite3 v1.14.35-0.20260227142656-2c447b9a2806
+```
+
 
 ```go
 key := make([]byte, 32)
