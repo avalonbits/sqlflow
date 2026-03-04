@@ -5,6 +5,23 @@ with separate read/write connections, serialised writes with exponential-backoff
 retries, and an optional per-key connection pool backed by a TinyLFU cache.
 At-rest encryption is supported via SQLCipher.
 
+## Table of Contents
+
+- [Installation](#installation)
+- [Encryption](#encryption)
+- [Concepts](#concepts)
+  - [Querier](#querier)
+  - [Migrations](#migrations)
+  - [Single database — DB\[Q\]](#single-database--dbq)
+  - [Per-key connection pool — Pool\[Q\]](#per-key-connection-pool--poolq)
+  - [Testing](#testing)
+- [Examples](#examples)
+  - [1. Single database — plain](#1-single-database--plain)
+  - [2. Single database — encrypted](#2-single-database--encrypted)
+  - [3. Connection pool — plain](#3-connection-pool--plain)
+  - [4. Connection pool — encrypted](#4-connection-pool--encrypted)
+- [License](#license)
+
 ## Installation
 
 ```sh
@@ -30,6 +47,75 @@ replace github.com/mattn/go-sqlite3 => github.com/jgiannuzzi/go-sqlite3 v1.14.35
 Then use `GetEncryptedDB` / `OpenEncryptedDB` (single database) or pass a
 `keyProvider` to `NewPool` (per-key pool). Both accept a 32-byte key; sqlflow
 passes it to the driver via DSN parameters at open time.
+
+## Concepts
+
+### Querier
+
+A `Querier[Q]` is a constructor function `func(tx DBTX) *Q` that builds your
+per-transaction accessor. If you use [sqlc](https://sqlc.dev/), pass
+`db.New` directly; otherwise write a thin wrapper.
+
+```go
+type Queries struct{ db sqlflow.DBTX }
+
+func New(tx sqlflow.DBTX) *Queries { return &Queries{db: tx} }
+
+var querier sqlflow.Querier[Queries] = New
+```
+
+### Migrations
+
+Pass an `fs.FS` whose **root** contains the goose `*.sql` migration files.
+
+```go
+// Embedded at compile time — sub-root so the FS root IS the migrations dir.
+//go:embed migrations
+var migrationsFS embed.FS
+
+fsys, _ := fs.Sub(migrationsFS, "migrations")
+
+// Or directly from disk at runtime:
+fsys := os.DirFS("/path/to/migrations")
+
+// Or in-memory for tests and examples:
+fsys := fstest.MapFS{
+    "001_init.sql": {Data: []byte(`-- +goose Up
+CREATE TABLE ...
+-- +goose Down
+DROP TABLE ...`)},
+}
+```
+
+### Single database — `DB[Q]`
+
+`GetDB` creates the file and any parent directories, runs all pending goose
+migrations, then opens separate read and write connections in WAL mode.
+Use `OpenDB` on the hot path to skip migrations when the file already exists.
+
+`Read` executes its callback inside a deferred read transaction; multiple
+goroutines may call it concurrently. `Write` executes inside an immediate
+(exclusive) transaction serialised by an internal mutex, with exponential-backoff
+retries on transient busy errors.
+
+### Per-key connection pool — `Pool[Q]`
+
+`Pool` manages a collection of SQLite databases — one per key (e.g. one per
+user). Databases are opened lazily and kept in a TinyLFU cache; evicted
+databases are closed only after all in-flight operations finish.
+
+Supply a `keyProvider` function to enable per-key encryption. If the key for a
+given user is unavailable, `Read`/`Write` return `sqlflow.ErrKeyNotAvailable`.
+
+### Testing
+
+`TestDB` and `TestPool` create in-memory / temp-dir instances and panic on
+error, keeping test setup concise:
+
+```go
+db   := sqlflow.TestDB(fsys, querier)
+pool := sqlflow.TestPool(t.TempDir(), fsys, querier)
+```
 
 ## Examples
 
@@ -414,75 +500,6 @@ func (ks *keyStore) Get(userID string) ([]byte, bool) {
 	k, ok := ks.keys[userID]
 	return k, ok
 }
-```
-
-## Concepts
-
-### Querier
-
-A `Querier[Q]` is a constructor function `func(tx DBTX) *Q` that builds your
-per-transaction accessor. If you use [sqlc](https://sqlc.dev/), pass
-`db.New` directly; otherwise write a thin wrapper.
-
-```go
-type Queries struct{ db sqlflow.DBTX }
-
-func New(tx sqlflow.DBTX) *Queries { return &Queries{db: tx} }
-
-var querier sqlflow.Querier[Queries] = New
-```
-
-### Migrations
-
-Pass an `fs.FS` whose **root** contains the goose `*.sql` migration files.
-
-```go
-// Embedded at compile time — sub-root so the FS root IS the migrations dir.
-//go:embed migrations
-var migrationsFS embed.FS
-
-fsys, _ := fs.Sub(migrationsFS, "migrations")
-
-// Or directly from disk at runtime:
-fsys := os.DirFS("/path/to/migrations")
-
-// Or in-memory for tests and examples:
-fsys := fstest.MapFS{
-    "001_init.sql": {Data: []byte(`-- +goose Up
-CREATE TABLE ...
--- +goose Down
-DROP TABLE ...`)},
-}
-```
-
-### Single database — `DB[Q]`
-
-`GetDB` creates the file and any parent directories, runs all pending goose
-migrations, then opens separate read and write connections in WAL mode.
-Use `OpenDB` on the hot path to skip migrations when the file already exists.
-
-`Read` executes its callback inside a deferred read transaction; multiple
-goroutines may call it concurrently. `Write` executes inside an immediate
-(exclusive) transaction serialised by an internal mutex, with exponential-backoff
-retries on transient busy errors.
-
-### Per-key connection pool — `Pool[Q]`
-
-`Pool` manages a collection of SQLite databases — one per key (e.g. one per
-user). Databases are opened lazily and kept in a TinyLFU cache; evicted
-databases are closed only after all in-flight operations finish.
-
-Supply a `keyProvider` function to enable per-key encryption. If the key for a
-given user is unavailable, `Read`/`Write` return `sqlflow.ErrKeyNotAvailable`.
-
-### Testing
-
-`TestDB` and `TestPool` create in-memory / temp-dir instances and panic on
-error, keeping test setup concise:
-
-```go
-db   := sqlflow.TestDB(fsys, querier)
-pool := sqlflow.TestPool(t.TempDir(), fsys, querier)
 ```
 
 ## License
