@@ -52,9 +52,9 @@ type Evicter interface {
 	Evict(userID string)
 }
 
-// Constructor is a function that builds a per-transaction accessor of type T
-// from a DBTX. It is called once per transaction inside Read and Write.
-type Constructor[T any] func(tx DBTX) *T
+// Queries is a function that builds a per-transaction accessor of type T from
+// a DBTX. It is called once per transaction inside Read and Write.
+type Queries[T any] func(tx DBTX) *T
 
 // DBTX is the interface satisfied by both *sql.DB and *sql.Tx, allowing the
 // same accessor type to be used within or outside a transaction.
@@ -78,7 +78,7 @@ type DBTX interface {
 // SQLite busy errors using exponential backoff; Read calls retry indefinitely
 // until the context is cancelled.
 type DB[T any] struct {
-	factory        Constructor[T]
+	factory        Queries[T]
 	rddb           *sql.DB
 	backoffRetries int
 
@@ -88,7 +88,7 @@ type DB[T any] struct {
 
 // TestDB creates an in-memory SQLite database, runs migrations, and returns a
 // DB ready for use in tests. Panics on any error so test setup stays concise.
-func TestDB[T any](migrations embed.FS, ctor Constructor[T]) *DB[T] {
+func TestDB[T any](migrations embed.FS, ctor Queries[T]) *DB[T] {
 	db, err := sql.Open("sqlite3", fmt.Sprintf(writeDSN, ":memory:"))
 	if err != nil {
 		panic(err)
@@ -106,7 +106,7 @@ func TestDB[T any](migrations embed.FS, ctor Constructor[T]) *DB[T] {
 // GetDB opens (or creates) the SQLite database at dbName, runs all pending
 // migrations, and returns an open DB. Pass a non-nil key to use SQLCipher
 // encryption; pass nil for an unencrypted database.
-func GetDB[T any](dbName string, migrations embed.FS, ctor Constructor[T], key []byte) (*DB[T], error) {
+func GetDB[T any](dbName string, migrations embed.FS, ctor Queries[T], key []byte) (*DB[T], error) {
 	if err := os.MkdirAll(filepath.Dir(dbName), 0o755); err != nil {
 		return nil, fmt.Errorf("creating db dir: %w", err)
 	}
@@ -137,7 +137,7 @@ func GetDB[T any](dbName string, migrations embed.FS, ctor Constructor[T], key [
 // does not exist yet, it falls back to GetDB (which creates and migrates it).
 // Use this on the hot path when migrations have already been applied (e.g.
 // via MigrateAll at startup).
-func OpenDB[T any](dbName string, migrations embed.FS, ctor Constructor[T], key []byte) (*DB[T], error) {
+func OpenDB[T any](dbName string, migrations embed.FS, ctor Queries[T], key []byte) (*DB[T], error) {
 	if _, err := os.Stat(dbName); err != nil {
 		// File doesn't exist — new DB, must create and migrate.
 		return GetDB(dbName, migrations, ctor, key)
@@ -235,7 +235,7 @@ var ErrKeyNotAvailable = errors.New("data key not available")
 type Pool[T any] struct {
 	dir        string
 	migrations embed.FS
-	factory    Constructor[T]
+	factory    Queries[T]
 
 	mu          sync.Mutex // serializes DB creation
 	cache       *ristretto.Cache[string, *poolEntry[T]]
@@ -273,7 +273,7 @@ func (p *Pool[T]) Wait() {
 // keyProvider, if non-nil, is set on the pool before MigrateAll runs so that
 // encrypted pools skip migration (per-DB migration is lazy in getOrCreate).
 func NewPool[T any](
-	dir string, migrations embed.FS, ctor Constructor[T], maxCached int64,
+	dir string, migrations embed.FS, ctor Queries[T], maxCached int64,
 	keyProvider func(string) ([]byte, bool),
 	inactivityTimeout time.Duration,
 ) (*Pool[T], error) {
@@ -318,7 +318,7 @@ func NewPool[T any](
 
 // TestPool returns a pool backed by dir for tests. Panics on error, matching
 // the TestDB convention.
-func TestPool[T any](dir string, migrations embed.FS, ctor Constructor[T]) *Pool[T] {
+func TestPool[T any](dir string, migrations embed.FS, ctor Queries[T]) *Pool[T] {
 	p, err := NewPool(dir, migrations, ctor, 100_000, nil, 0)
 	if err != nil {
 		panic(fmt.Sprintf("creating test pool: %v", err))
@@ -425,7 +425,7 @@ func (p *Pool[T]) Close() error {
 	return errors.Join(errs...)
 }
 
-func openDBConns[T any](dbName string, ctor Constructor[T], key []byte) (*DB[T], error) {
+func openDBConns[T any](dbName string, ctor Queries[T], key []byte) (*DB[T], error) {
 	var rDSN, wDSN string
 
 	if len(key) > 0 {
