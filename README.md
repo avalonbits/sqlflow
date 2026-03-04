@@ -5,6 +5,9 @@ with separate read/write connections, serialised writes with exponential-backoff
 retries, and an optional per-key connection pool backed by a TinyLFU cache.
 At-rest encryption is supported via SQLCipher.
 
+All database access goes through `Read` and `Write` — the core abstraction.
+They manage transactions automatically so you never touch a raw connection directly.
+
 ## Table of Contents
 
 - [Installation](#installation)
