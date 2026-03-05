@@ -88,11 +88,12 @@ func TestEmbedMigrations(t *testing.T) {
 	}
 
 	var got string
-	if err := db.Read(ctx, func(q *kvQuerier) error {
+	err := db.Read(ctx, func(q *kvQuerier) error {
 		var err error
 		got, err = q.Get(ctx, "k")
 		return err
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -113,11 +114,12 @@ func TestDirMigrations(t *testing.T) {
 	}
 
 	var got string
-	if err := db.Read(ctx, func(q *kvQuerier) error {
+	err := db.Read(ctx, func(q *kvQuerier) error {
 		var err error
 		got, err = q.Get(ctx, "k")
 		return err
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -159,11 +161,12 @@ func TestTestDB(t *testing.T) {
 	}
 
 	var got string
-	if err := db.Read(ctx, func(q *kvQuerier) error {
+	err := db.Read(ctx, func(q *kvQuerier) error {
 		var err error
 		got, err = q.Get(ctx, "hello")
 		return err
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -213,11 +216,12 @@ func TestGetDB(t *testing.T) {
 			}
 
 			var got string
-			if err := db.Read(ctx, func(q *kvQuerier) error {
+			err = db.Read(ctx, func(q *kvQuerier) error {
 				var err error
 				got, err = q.Get(ctx, "a")
 				return err
-			}); err != nil {
+			})
+			if err != nil {
 				t.Fatal(err)
 			}
 
@@ -350,11 +354,12 @@ func TestGetEncryptedDB(t *testing.T) {
 			}
 
 			var got string
-			if err := db.Read(ctx, func(q *kvQuerier) error {
+			err = db.Read(ctx, func(q *kvQuerier) error {
 				var err error
 				got, err = q.Get(ctx, "secret")
 				return err
-			}); err != nil {
+			})
+			if err != nil {
 				t.Fatal(err)
 			}
 
@@ -390,8 +395,7 @@ func TestGetEncryptedDB_WrongKey(t *testing.T) {
 
 			db2, err := sqlflow.OpenEncryptedDB(path, mc.fsys, newQuerier(), badKey)
 			if err != nil {
-				// Some implementations fail at open time.
-				return
+				t.Fatal(err)
 			}
 			defer db2.Close()
 
@@ -451,11 +455,12 @@ func TestOpenDB_NewFile(t *testing.T) {
 			}
 
 			var got string
-			if err := db.Read(ctx, func(q *kvQuerier) error {
+			err = db.Read(ctx, func(q *kvQuerier) error {
 				var err error
 				got, err = q.Get(ctx, "x")
 				return err
-			}); err != nil {
+			})
+			if err != nil {
 				t.Fatal(err)
 			}
 
@@ -492,11 +497,12 @@ func TestOpenDB_ExistingFile(t *testing.T) {
 			}
 
 			var got string
-			if err := db2.Read(ctx, func(q *kvQuerier) error {
+			err = db2.Read(ctx, func(q *kvQuerier) error {
 				var err error
 				got, err = q.Get(ctx, "p")
 				return err
-			}); err != nil {
+			})
+			if err != nil {
 				t.Fatal(err)
 			}
 
@@ -559,11 +565,12 @@ func TestOpenEncryptedDB_NewFile(t *testing.T) {
 			}
 
 			var got string
-			if err := db.Read(ctx, func(q *kvQuerier) error {
+			err = db.Read(ctx, func(q *kvQuerier) error {
 				var err error
 				got, err = q.Get(ctx, "n")
 				return err
-			}); err != nil {
+			})
+			if err != nil {
 				t.Fatal(err)
 			}
 
@@ -605,11 +612,12 @@ func TestOpenEncryptedDB_ExistingFile(t *testing.T) {
 			}
 
 			var got string
-			if err := db2.Read(ctx, func(q *kvQuerier) error {
+			err = db2.Read(ctx, func(q *kvQuerier) error {
 				var err error
 				got, err = q.Get(ctx, "e")
 				return err
-			}); err != nil {
+			})
+			if err != nil {
 				t.Fatal(err)
 			}
 
@@ -679,11 +687,12 @@ func TestDB_WriteRead(t *testing.T) {
 
 	for _, p := range pairs {
 		var got string
-		if err := db.Read(ctx, func(q *kvQuerier) error {
+		err := db.Read(ctx, func(q *kvQuerier) error {
 			var err error
 			got, err = q.Get(ctx, p[0])
 			return err
-		}); err != nil {
+		})
+		if err != nil {
 			t.Fatal(err)
 		}
 
@@ -708,11 +717,12 @@ func TestDB_WriteOverwrite(t *testing.T) {
 	}
 
 	var got string
-	if err := db.Read(ctx, func(q *kvQuerier) error {
+	err := db.Read(ctx, func(q *kvQuerier) error {
 		var err error
 		got, err = q.Get(ctx, "k")
 		return err
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -794,11 +804,12 @@ func TestDB_ConcurrentWrites(t *testing.T) {
 
 	for i := range 50 {
 		var got string
-		if err := db.Read(ctx, func(q *kvQuerier) error {
+		err := db.Read(ctx, func(q *kvQuerier) error {
 			var err error
 			got, err = q.Get(ctx, fmt.Sprintf("key%d", i))
 			return err
-		}); err != nil {
+		})
+		if err != nil {
 			t.Errorf("key%d: %v", i, err)
 		} else if got != "v" {
 			t.Errorf("key%d: got %q want %q", i, got, "v")
@@ -1009,11 +1020,12 @@ func TestTestPool(t *testing.T) {
 			}
 
 			var got string
-			if err := p.Read(ctx, "alice", func(q *kvQuerier) error {
+			err := p.Read(ctx, "alice", func(q *kvQuerier) error {
 				var err error
 				got, err = q.Get(ctx, "k")
 				return err
-			}); err != nil {
+			})
+			if err != nil {
 				t.Fatal(err)
 			}
 
@@ -1146,11 +1158,12 @@ func TestPool_WriteRead(t *testing.T) {
 
 	for _, k := range keys {
 		var got string
-		if err := p.Read(ctx, k, func(q *kvQuerier) error {
+		err := p.Read(ctx, k, func(q *kvQuerier) error {
 			var err error
 			got, err = q.Get(ctx, "x")
 			return err
-		}); err != nil {
+		})
+		if err != nil {
 			t.Fatal(err)
 		}
 
@@ -1468,19 +1481,21 @@ func TestPool_InactivityReaper_ActiveNotEvicted(t *testing.T) {
 	ctx := context.Background()
 	// Keep the entry active by writing every 50ms for 400ms.
 	for i := range 8 {
-		if err := p.Write(ctx, "active", func(q *kvQuerier) error {
+		err := p.Write(ctx, "active", func(q *kvQuerier) error {
 			return q.Set(ctx, "n", fmt.Sprintf("%d", i))
-		}); err != nil {
+		})
+		if err != nil {
 			t.Fatalf("keep-alive write %d: %v", i, err)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 
 	// Should still be readable without error.
-	if err := p.Read(ctx, "active", func(q *kvQuerier) error {
+	err = p.Read(ctx, "active", func(q *kvQuerier) error {
 		_, err := q.Get(ctx, "n")
 		return err
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("read after active period: %v", err)
 	}
 }
