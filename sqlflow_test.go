@@ -1206,39 +1206,6 @@ func TestNewPool_CreatesDir(t *testing.T) {
 	}
 }
 
-func TestNewPool_MigratesExistingDBs(t *testing.T) {
-	t.Parallel()
-
-	for _, mc := range bothMigrations(t) {
-		t.Run(mc.name, func(t *testing.T) {
-			t.Parallel()
-
-			dir := t.TempDir()
-			// Create a bare, un-migrated SQLite file.
-			bare := filepath.Join(dir, "preexist.db")
-			rawDB, err := sql.Open("sqlite3", bare)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := rawDB.Ping(); err != nil {
-				t.Fatal(err)
-			}
-			rawDB.Close()
-
-			p, err := sqlflow.NewPool(dir, newQuerier(), 1000, 0, goosePoolOpt(mc))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer p.Close()
-
-			ctx := context.Background()
-			if err := p.Write(ctx, "preexist", func(q *kvQuerier) error { return q.Set(ctx, "m", "n") }); err != nil {
-				t.Fatalf("write after MigrateAll: %v", err)
-			}
-		})
-	}
-}
-
 func TestNewPool_BadDir(t *testing.T) {
 	t.Parallel()
 
@@ -1255,35 +1222,6 @@ func TestNewPool_BadDir(t *testing.T) {
 			_, err := sqlflow.NewPool(filepath.Join(blocker, "pool"), newQuerier(), 1000, 0, goosePoolOpt(mc))
 			if err == nil {
 				t.Fatal("expected error, got nil")
-			}
-		})
-	}
-}
-
-func TestNewPool_BadMigration(t *testing.T) {
-	t.Parallel()
-
-	for _, mc := range []migrationCase{
-		{name: "embed", opt: migrators.Goose[kvQuerier](embed.FS{})},
-		{name: "dir", opt: migrators.Goose[kvQuerier](os.DirFS("/nonexistent"))},
-	} {
-		t.Run(mc.name, func(t *testing.T) {
-			t.Parallel()
-
-			dir := t.TempDir()
-			// Pre-create a .db file so MigrateAll has something to migrate.
-			rawDB, err := sql.Open("sqlite3", filepath.Join(dir, "existing.db"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := rawDB.Ping(); err != nil {
-				t.Fatal(err)
-			}
-			rawDB.Close()
-
-			_, err = sqlflow.NewPool(dir, newQuerier(), 1000, 0, goosePoolOpt(mc))
-			if err == nil {
-				t.Fatal("expected error with bad migration, got nil")
 			}
 		})
 	}
@@ -1688,76 +1626,7 @@ func TestPool_Evict_NonExistent(t *testing.T) {
 	p.Evict("nobody")
 }
 
-// --- Section 14: Pool.MigrateAll ---
-
-func TestPool_MigrateAll(t *testing.T) {
-	t.Parallel()
-
-	for _, mc := range bothMigrations(t) {
-		t.Run(mc.name, func(t *testing.T) {
-			t.Parallel()
-
-			dir := t.TempDir()
-			for _, name := range []string{"a", "b"} {
-				rawDB, err := sql.Open("sqlite3", filepath.Join(dir, name+".db"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := rawDB.Ping(); err != nil {
-					t.Fatal(err)
-				}
-				rawDB.Close()
-			}
-
-			p, err := sqlflow.NewPool(dir, newQuerier(), 1000, 0, goosePoolOpt(mc))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer p.Close()
-
-			ctx := context.Background()
-			for _, k := range []string{"a", "b"} {
-				if err := p.Write(ctx, k, func(q *kvQuerier) error { return q.Set(ctx, "x", k) }); err != nil {
-					t.Fatalf("key %q: %v", k, err)
-				}
-			}
-		})
-	}
-}
-
-func TestPool_MigrateAll_SkipsForEncrypted(t *testing.T) {
-	t.Parallel()
-
-	for _, mc := range bothMigrations(t) {
-		t.Run(mc.name, func(t *testing.T) {
-			t.Parallel()
-
-			dir := t.TempDir()
-			key := make([]byte, 32)
-			for i := range key {
-				key[i] = byte(i + 1)
-			}
-
-			p, err := sqlflow.NewEncryptedPool(
-				dir, newQuerier(), 1000,
-				func(string) ([]byte, bool) { return key, true },
-				0,
-				goosePoolOpt(mc),
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer p.Close()
-
-			ctx := context.Background()
-			if err := p.Write(ctx, "user1", func(q *kvQuerier) error { return q.Set(ctx, "k", "v") }); err != nil {
-				t.Fatalf("lazy migration write: %v", err)
-			}
-		})
-	}
-}
-
-// --- Section 15: Pool.ListKeys ---
+// --- Section 14: Pool.ListKeys ---
 
 func TestPool_ListKeys(t *testing.T) {
 	t.Parallel()

@@ -185,10 +185,10 @@ func GetEncryptedDB[Queries any](dbName string, querier Querier[Queries], key []
 	return getDB(dbName, querier, key, opts)
 }
 
-// OpenDB opens an existing database without running migrations. If the file
-// does not exist yet, it falls back to GetDB (which creates it and fires the
-// OnOpen hook). Use this on the hot path when migrations have already been
-// applied (e.g. via MigrateAll at startup).
+// OpenDB opens an existing database without running the OnOpen hook. If the
+// file does not exist yet, it falls back to GetDB (which creates it and fires
+// the OnOpen hook). Use this on the hot path when first-open setup (e.g.
+// schema migrations) has already been completed.
 func OpenDB[Queries any](dbName string, querier Querier[Queries], opts ...Option[Queries]) (*DB[Queries], error) {
 	if _, err := os.Stat(dbName); err != nil {
 		// File doesn't exist — new DB, must create and run OnOpen hook.
@@ -402,37 +402,6 @@ func (p *Pool[Queries]) Write(ctx context.Context, key string, f func(*Queries) 
 	return entry.db.Write(ctx, f)
 }
 
-// MigrateAll opens every *.db file under dir, fires the OnOpen hook (e.g. for
-// schema migrations), and closes. If a keyProvider is configured, migration is
-// skipped (lazy per-DB migration happens in getOrCreate when the data key is
-// available).
-func (p *Pool[Queries]) MigrateAll() error {
-	if p.keyProvider != nil {
-		return nil
-	}
-
-	matches, err := filepath.Glob(filepath.Join(p.dir, "*.db"))
-	if err != nil {
-		return fmt.Errorf("globbing db files: %w", err)
-	}
-
-	for _, path := range matches {
-		var opts []Option[Queries]
-		if p.dbFactory != nil {
-			opts = p.dbFactory()
-		}
-
-		db, err := openDBConns(path, p.querier, nil, opts)
-		if err != nil {
-			return fmt.Errorf("migrating %s: %w", path, err)
-		}
-
-		db.Close()
-	}
-
-	return nil
-}
-
 // ListKeys returns the key (user ID) for every database file in the pool
 // directory. The returned slice is sorted by filesystem order.
 func (p *Pool[Queries]) ListKeys() ([]string, error) {
@@ -516,13 +485,6 @@ func newPool[Queries any](
 		return nil, fmt.Errorf("creating pool cache: %w", err)
 	}
 	p.cache = cache
-
-	if err := p.MigrateAll(); err != nil {
-		cancel()
-		p.cache.Close()
-
-		return nil, fmt.Errorf("migrating existing databases: %w", err)
-	}
 
 	if inactivityTimeout > 0 {
 		go p.runInactivityReaper(ctx)
