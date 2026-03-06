@@ -92,21 +92,21 @@ func dbCases() []dbCase {
 }
 
 // openGetDB calls GetDB or GetEncryptedDB based on whether key is nil.
-func openGetDB(path string, fsys fs.FS, key []byte) (*sqlflow.DB[kvQuerier], error) {
+func openGetDB(path string, fsys fs.FS, key []byte, opts ...sqlflow.Option[kvQuerier]) (*sqlflow.DB[kvQuerier], error) {
 	if len(key) > 0 {
-		return sqlflow.GetEncryptedDB(path, fsys, newQuerier(), key)
+		return sqlflow.GetEncryptedDB(path, fsys, newQuerier(), key, opts...)
 	}
 
-	return sqlflow.GetDB(path, fsys, newQuerier())
+	return sqlflow.GetDB(path, fsys, newQuerier(), opts...)
 }
 
 // openOpenDB calls OpenDB or OpenEncryptedDB based on whether key is nil.
-func openOpenDB(path string, fsys fs.FS, key []byte) (*sqlflow.DB[kvQuerier], error) {
+func openOpenDB(path string, fsys fs.FS, key []byte, opts ...sqlflow.Option[kvQuerier]) (*sqlflow.DB[kvQuerier], error) {
 	if len(key) > 0 {
-		return sqlflow.OpenEncryptedDB(path, fsys, newQuerier(), key)
+		return sqlflow.OpenEncryptedDB(path, fsys, newQuerier(), key, opts...)
 	}
 
-	return sqlflow.OpenDB(path, fsys, newQuerier())
+	return sqlflow.OpenDB(path, fsys, newQuerier(), opts...)
 }
 
 // --- Section 1: Migrations constructors ---
@@ -898,6 +898,211 @@ func TestDB_Close_Idempotent(t *testing.T) {
 	db.Close() //nolint
 	// Second close should not panic.
 	_ = db.Close()
+}
+
+// --- Section 9a: DB lifecycle options (OnOpen / OnClose) ---
+
+func TestDB_OnOpen_Called(t *testing.T) {
+	t.Parallel()
+
+	for _, dc := range dbCases() {
+		t.Run(dc.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join(t.TempDir(), "hooks.db")
+			var gotPath string
+			db, err := openGetDB(path, embedFS(), dc.key,
+				sqlflow.OnOpen[kvQuerier](func(p string) error {
+					gotPath = p
+					return nil
+				}),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			db.Close()
+
+			if gotPath != path {
+				t.Errorf("OnOpen got path %q, want %q", gotPath, path)
+			}
+		})
+	}
+}
+
+func TestDB_OnOpen_CalledForOpenDB(t *testing.T) {
+	t.Parallel()
+
+	for _, dc := range dbCases() {
+		t.Run(dc.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join(t.TempDir(), "open.db")
+
+			// Create the file first so OpenDB takes the "existing file" path.
+			seed, err := openGetDB(path, embedFS(), dc.key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seed.Close()
+
+			var called bool
+			db, err := openOpenDB(path, embedFS(), dc.key,
+				sqlflow.OnOpen[kvQuerier](func(string) error {
+					called = true
+					return nil
+				}),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			db.Close()
+
+			if !called {
+				t.Error("OnOpen was not called by OpenDB on existing file")
+			}
+		})
+	}
+}
+
+func TestDB_OnOpen_Error(t *testing.T) {
+	t.Parallel()
+
+	for _, dc := range dbCases() {
+		t.Run(dc.name, func(t *testing.T) {
+			t.Parallel()
+
+			sentinel := errors.New("open hook failed")
+			path := filepath.Join(t.TempDir(), "err.db")
+			_, err := openGetDB(path, embedFS(), dc.key,
+				sqlflow.OnOpen[kvQuerier](func(string) error { return sentinel }),
+			)
+			if !errors.Is(err, sentinel) {
+				t.Errorf("got %v, want sentinel error", err)
+			}
+		})
+	}
+}
+
+func TestTestDB_OnOpen_Called(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	db := sqlflow.TestDB(embedFS(), newQuerier(),
+		sqlflow.OnOpen[kvQuerier](func(p string) error {
+			gotPath = p
+			return nil
+		}),
+	)
+	defer db.Close()
+
+	if gotPath != ":memory:" {
+		t.Errorf("TestDB OnOpen got path %q, want %q", gotPath, ":memory:")
+	}
+}
+
+func TestTestDB_OnOpen_Error_Panics(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic from OnOpen error, got none")
+		}
+	}()
+
+	sqlflow.TestDB(embedFS(), newQuerier(),
+		sqlflow.OnOpen[kvQuerier](func(string) error {
+			return errors.New("hook failure")
+		}),
+	)
+}
+
+func TestDB_OnClose_Called(t *testing.T) {
+	t.Parallel()
+
+	for _, dc := range dbCases() {
+		t.Run(dc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var called bool
+			db, err := openGetDB(
+				filepath.Join(t.TempDir(), "close.db"),
+				embedFS(), dc.key,
+				sqlflow.OnClose[kvQuerier](func() { called = true }),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			db.Close()
+
+			if !called {
+				t.Error("OnClose was not called after Close()")
+			}
+		})
+	}
+}
+
+func TestDB_OnClose_CalledOnceOnDoubleClose(t *testing.T) {
+	t.Parallel()
+
+	var count int
+	db, err := openGetDB(
+		filepath.Join(t.TempDir(), "twice.db"),
+		embedFS(), nil,
+		sqlflow.OnClose[kvQuerier](func() { count++ }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db.Close() //nolint
+	db.Close() //nolint
+
+	if count != 1 {
+		t.Errorf("OnClose called %d times, want 1", count)
+	}
+}
+
+func TestTestDB_OnClose_Called(t *testing.T) {
+	t.Parallel()
+
+	var called bool
+	db := sqlflow.TestDB(embedFS(), newQuerier(),
+		sqlflow.OnClose[kvQuerier](func() { called = true }),
+	)
+
+	db.Close() //nolint
+
+	if !called {
+		t.Error("OnClose was not called after TestDB.Close()")
+	}
+}
+
+func TestDB_OnOpen_OnClose_SharedState(t *testing.T) {
+	t.Parallel()
+
+	// Verify that a closure can share state between OnOpen and OnClose.
+	var openedPath string
+	var closedPath string
+
+	db, err := openGetDB(
+		filepath.Join(t.TempDir(), "shared.db"),
+		embedFS(), nil,
+		sqlflow.OnOpen[kvQuerier](func(p string) error {
+			openedPath = p
+			return nil
+		}),
+		sqlflow.OnClose[kvQuerier](func() { closedPath = openedPath }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db.Close()
+
+	if closedPath == "" {
+		t.Error("OnClose did not see state set by OnOpen")
+	}
 }
 
 // --- Section 10: NoRows ---

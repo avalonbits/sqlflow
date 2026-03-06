@@ -58,6 +58,28 @@ type DBTX interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
+// Option is a functional option that configures a DB instance. Options are
+// applied after all connections are open, before the DB is returned to the
+// caller. Passing no options is always valid.
+type Option[Q any] func(*DB[Q])
+
+// OnOpen registers fn to be called with the database file path once all
+// connections are established and the DB is ready for use. If fn returns a
+// non-nil error, the connections are closed and the error is propagated from
+// the constructor.
+//
+// For in-memory databases created by TestDB the path is ":memory:".
+func OnOpen[Q any](fn func(path string) error) Option[Q] {
+	return func(db *DB[Q]) { db.onOpen = fn }
+}
+
+// OnClose registers fn to be called after both database connections are
+// closed. fn fires at most once even if Close is called multiple times. Use
+// OnClose to release resources tied to this DB's lifetime (e.g. lock files).
+func OnClose[Q any](fn func()) Option[Q] {
+	return func(db *DB[Q]) { db.onClose = fn }
+}
+
 // DB is a SQLite database handle parameterised by a per-transaction accessor type
 // Queries. It maintains two underlying sql.DB connections:
 //
@@ -87,6 +109,20 @@ type DB[Queries any] struct {
 
 	// wrdb is the single write connection; MaxOpenConns=1, _txlock=immediate.
 	wrdb *sql.DB
+
+	// path is the database file path provided to the constructor; ":memory:"
+	// for in-memory test databases.
+	path string
+
+	// onOpen is called with path once all connections are ready. A non-nil
+	// error aborts the open and the connections are closed.
+	onOpen func(string) error
+
+	// onClose is called exactly once when Close is invoked.
+	onClose func()
+
+	// closeOnce ensures onClose fires at most once across multiple Close calls.
+	closeOnce sync.Once
 }
 
 // TestDB creates an in-memory SQLite database, runs migrations from fsys, and
@@ -94,60 +130,73 @@ type DB[Queries any] struct {
 //
 // Panics on any error so test setup stays concise.
 // fsys must contain the *.sql migration files at its root.
-func TestDB[Queries any](fsys fs.FS, querier Querier[Queries]) *DB[Queries] {
-	db, err := sql.Open("sqlite3", fmt.Sprintf(writeDSN, ":memory:"))
+func TestDB[Queries any](fsys fs.FS, querier Querier[Queries], opts ...Option[Queries]) *DB[Queries] {
+	conn, err := sql.Open("sqlite3", fmt.Sprintf(writeDSN, ":memory:"))
 	if err != nil {
 		panic(err)
 	}
-	db.SetMaxOpenConns(1)
+	conn.SetMaxOpenConns(1)
 
-	if err := migrate(db, fsys); err != nil {
-		db.Close()
+	if err := migrate(conn, fsys); err != nil {
+		conn.Close()
 		panic(err)
 	}
 
-	return &DB[Queries]{querier: querier, rddb: db, mu: &sync.Mutex{}, wrdb: db, backoffRetries: 1}
+	db := &DB[Queries]{querier: querier, rddb: conn, mu: &sync.Mutex{}, wrdb: conn, backoffRetries: 1, path: ":memory:"}
+
+	for _, opt := range opts {
+		opt(db)
+	}
+
+	if db.onOpen != nil {
+		if err := db.onOpen(":memory:"); err != nil {
+			conn.Close()
+			panic(fmt.Sprintf("onOpen hook: %v", err))
+		}
+	}
+
+	return db
 }
 
 // GetDB opens (or creates) the SQLite database at dbName, runs all pending
 // migrations from fsys, and returns an open DB.
 // fsys must contain the *.sq; migration files at its root.
-func GetDB[Queries any](dbName string, fsys fs.FS, querier Querier[Queries]) (*DB[Queries], error) {
-	return getDB(dbName, fsys, querier, nil)
+func GetDB[Queries any](dbName string, fsys fs.FS, querier Querier[Queries], opts ...Option[Queries]) (*DB[Queries], error) {
+	return getDB(dbName, fsys, querier, nil, opts)
 }
 
 // GetEncryptedDB opens (or creates) the SQLCipher-encrypted SQLite database at
 // dbName, runs all pending migrations from fsys, and returns an open DB.
-func GetEncryptedDB[Queries any](dbName string, fsys fs.FS, querier Querier[Queries], key []byte) (*DB[Queries], error) {
-	return getDB(dbName, fsys, querier, key)
+func GetEncryptedDB[Queries any](dbName string, fsys fs.FS, querier Querier[Queries], key []byte, opts ...Option[Queries]) (*DB[Queries], error) {
+	return getDB(dbName, fsys, querier, key, opts)
 }
 
 // OpenDB opens an existing database without running migrations. If the file
 // does not exist yet, it falls back to GetDB (which creates and migrates it).
 // Use this on the hot path when migrations have already been applied (e.g.
 // via MigrateAll at startup).
-func OpenDB[Queries any](dbName string, fsys fs.FS, querier Querier[Queries]) (*DB[Queries], error) {
+func OpenDB[Queries any](dbName string, fsys fs.FS, querier Querier[Queries], opts ...Option[Queries]) (*DB[Queries], error) {
 	if _, err := os.Stat(dbName); err != nil {
 		// File doesn't exist — new DB, must create and migrate.
-		return GetDB(dbName, fsys, querier)
+		return getDB(dbName, fsys, querier, nil, opts)
 	}
 
-	return openDBConns(dbName, querier, nil)
+	return openDBConns(dbName, querier, nil, opts)
 }
 
 // OpenEncryptedDB opens an existing SQLCipher-encrypted database without
 // running migrations. If the file does not exist yet, it falls back to
 // GetEncryptedDB (which creates and migrates it).
-func OpenEncryptedDB[Queries any](dbName string, fsys fs.FS, querier Querier[Queries], key []byte) (*DB[Queries], error) {
+func OpenEncryptedDB[Queries any](dbName string, fsys fs.FS, querier Querier[Queries], key []byte, opts ...Option[Queries]) (*DB[Queries], error) {
 	if _, err := os.Stat(dbName); err != nil {
 		// File doesn't exist — new DB, must create and migrate.
-		return GetEncryptedDB(dbName, fsys, querier, key)
+		return getDB(dbName, fsys, querier, key, opts)
 	}
 
-	return openDBConns(dbName, querier, key)
+	return openDBConns(dbName, querier, key, opts)
 }
 
-func getDB[Queries any](dbName string, fsys fs.FS, querier Querier[Queries], key []byte) (*DB[Queries], error) {
+func getDB[Queries any](dbName string, fsys fs.FS, querier Querier[Queries], key []byte, opts []Option[Queries]) (*DB[Queries], error) {
 	if err := os.MkdirAll(filepath.Dir(dbName), 0o755); err != nil {
 		return nil, fmt.Errorf("creating db dir: %w", err)
 	}
@@ -171,12 +220,19 @@ func getDB[Queries any](dbName string, fsys fs.FS, querier Querier[Queries], key
 	}
 	db.Close()
 
-	return openDBConns(dbName, querier, key)
+	return openDBConns(dbName, querier, key, opts)
 }
 
-// Close closes both the read and write database connections. It waits for any
-// in-flight operations to complete before returning.
+// Close calls the OnClose hook (if any) exactly once, then closes both the
+// read and write database connections. It waits for any in-flight operations
+// to complete before returning.
 func (db *DB[Queries]) Close() error {
+	db.closeOnce.Do(func() {
+		if db.onClose != nil {
+			db.onClose()
+		}
+	})
+
 	return errors.Join(db.rddb.Close(), db.wrdb.Close())
 }
 
@@ -470,7 +526,7 @@ func (p *Pool[Queries]) Close() error {
 	return errors.Join(errs...)
 }
 
-func openDBConns[Queries any](dbName string, querier Querier[Queries], key []byte) (*DB[Queries], error) {
+func openDBConns[Queries any](dbName string, querier Querier[Queries], key []byte, opts []Option[Queries]) (*DB[Queries], error) {
 	var rDSN, wDSN string
 
 	if len(key) > 0 {
@@ -494,7 +550,22 @@ func openDBConns[Queries any](dbName string, querier Querier[Queries], key []byt
 		return nil, err
 	}
 
-	return &DB[Queries]{querier: querier, rddb: rddb, mu: &sync.Mutex{}, wrdb: wrdb, backoffRetries: 5}, nil
+	db := &DB[Queries]{querier: querier, rddb: rddb, mu: &sync.Mutex{}, wrdb: wrdb, backoffRetries: 5, path: dbName}
+
+	for _, opt := range opts {
+		opt(db)
+	}
+
+	if db.onOpen != nil {
+		if err := db.onOpen(dbName); err != nil {
+			db.rddb.Close()
+			db.wrdb.Close()
+
+			return nil, fmt.Errorf("onOpen hook for %q: %w", dbName, err)
+		}
+	}
+
+	return db, nil
 }
 
 // runInactivityReaper periodically evicts pool entries that have been idle
@@ -574,7 +645,7 @@ func (p *Pool[Queries]) getOrCreate(key string) (*poolEntry[Queries], error) {
 		dbKey = k
 	}
 
-	newDB, err := getDB(dbPath, p.fsys, p.querier, dbKey)
+	newDB, err := getDB(dbPath, p.fsys, p.querier, dbKey, nil)
 	if err != nil {
 		return nil, fmt.Errorf("opening db for %q: %w", key, err)
 	}
