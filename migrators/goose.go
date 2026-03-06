@@ -1,5 +1,5 @@
 // Package migrators provides migration helpers for sqlflow databases.
-// Each helper returns an options.Option[Q] that can be passed to any
+// Each helper returns a sqlflow.Option[Q] that can be passed to any
 // sqlflow constructor (GetDB, TestDB, or via WithDBFactory for pools).
 package migrators
 
@@ -10,7 +10,7 @@ import (
 
 	"github.com/pressly/goose/v3"
 
-	"github.com/avalonbits/sqlflow/options"
+	"github.com/avalonbits/sqlflow"
 )
 
 // Goose returns an Option that runs goose migrations from fsys when the
@@ -19,8 +19,8 @@ import (
 //
 // fsys must contain the *.sql migration files at its root (no subdirectory).
 // Use embed.FS with fs.Sub or os.DirFS to obtain a suitable fs.FS.
-func Goose[Q any](fsys fs.FS) options.Option[Q] {
-	return options.OnOpen[Q](func(_ string, db *sql.DB) error {
+func Goose[Q any](fsys fs.FS) sqlflow.Option[Q] {
+	return sqlflow.OnOpen[Q](func(_ string, db *sql.DB) error {
 		return migrate(db, fsys)
 	})
 }

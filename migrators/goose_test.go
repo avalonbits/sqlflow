@@ -8,8 +8,8 @@ import (
 	"os"
 	"testing"
 
+	"github.com/avalonbits/sqlflow"
 	"github.com/avalonbits/sqlflow/migrators"
-	"github.com/avalonbits/sqlflow/options"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -41,7 +41,7 @@ func applyGoose(t *testing.T, fsys fs.FS) *sql.DB {
 	}
 
 	opt := migrators.Goose[any](fsys)
-	var cfg options.Config[any]
+	var cfg sqlflow.Config[any]
 	opt(&cfg)
 
 	if err := cfg.OnOpenFn("", db); err != nil {
@@ -88,7 +88,7 @@ func TestGoose_Idempotent(t *testing.T) {
 
 	fsys := embedFS()
 	opt := migrators.Goose[any](fsys)
-	var cfg options.Config[any]
+	var cfg sqlflow.Config[any]
 	opt(&cfg)
 
 	for i := range 2 {
@@ -118,7 +118,7 @@ func TestGoose_BadFS(t *testing.T) {
 			defer db.Close()
 
 			opt := migrators.Goose[any](tc.fsys)
-			var cfg options.Config[any]
+			var cfg sqlflow.Config[any]
 			opt(&cfg)
 
 			if err := cfg.OnOpenFn("", db); err == nil {
