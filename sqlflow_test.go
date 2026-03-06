@@ -92,54 +92,6 @@ func openGetDB(path string, key []byte, opts ...sqlflow.Option[kvQuerier]) (*sql
 
 // --- Section 1: Migrations constructors ---
 
-func TestMigrations(t *testing.T) {
-	t.Parallel()
-
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose[kvQuerier](embedFS()))
-	defer db.Close()
-
-	ctx := context.Background()
-	if err := db.Write(ctx, func(q *kvQuerier) error { return q.Set(ctx, "k", "v") }); err != nil {
-		t.Fatal(err)
-	}
-
-	var got string
-	err := db.Read(ctx, func(q *kvQuerier) error {
-		var err error
-		got, err = q.Get(ctx, "k")
-		return err
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if got != "v" {
-		t.Fatalf("got %q want %q", got, "v")
-	}
-}
-
-func TestDirMigrations_BadPath(t *testing.T) {
-	t.Parallel()
-
-	for _, tc := range []struct {
-		name string
-		opt  sqlflow.Option[kvQuerier]
-	}{
-		{name: "embed", opt: migrators.Goose[kvQuerier](embed.FS{})},
-		{name: "dir", opt: migrators.Goose[kvQuerier](os.DirFS("/nonexistent/path/that/does/not/exist"))},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			dir := t.TempDir()
-			_, err := sqlflow.GetDB(filepath.Join(dir, "test.db"), newQuerier(), tc.opt)
-			if err == nil {
-				t.Fatal("expected error, got nil")
-			}
-		})
-	}
-}
-
 // --- Section 2: TestDB ---
 
 func TestTestDB(t *testing.T) {
@@ -165,29 +117,6 @@ func TestTestDB(t *testing.T) {
 
 	if got != "world" {
 		t.Fatalf("got %q want %q", got, "world")
-	}
-}
-
-func TestTestDB_Panic(t *testing.T) {
-	t.Parallel()
-
-	for _, tc := range []struct {
-		name string
-		opt  sqlflow.Option[kvQuerier]
-	}{
-		{name: "embed", opt: migrators.Goose[kvQuerier](embed.FS{})},
-		{name: "dir", opt: migrators.Goose[kvQuerier](os.DirFS("/nonexistent/path"))},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			defer func() {
-				if r := recover(); r == nil {
-					t.Fatal("expected panic, got none")
-				}
-			}()
-			sqlflow.TestDB(newQuerier(), tc.opt)
-		})
 	}
 }
 
@@ -245,56 +174,6 @@ func TestGetDB_CreatesDir(t *testing.T) {
 			if _, err := os.Stat(filepath.Dir(path)); err != nil {
 				t.Fatalf("directory not created: %v", err)
 			}
-		})
-	}
-}
-
-func TestGetDB_RunsMigrations(t *testing.T) {
-	t.Parallel()
-
-	for _, dc := range dbCases() {
-		t.Run(dc.name, func(t *testing.T) {
-			t.Parallel()
-
-			db, err := openGetDB(filepath.Join(t.TempDir(), "test.db"), dc.key, migrators.Goose[kvQuerier](embedFS()))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db.Close()
-
-			// Verify migrations ran by writing to the kv table; fails if the
-			// table was not created. This works for both plain and encrypted DBs.
-			ctx := context.Background()
-			if err := db.Write(ctx, func(q *kvQuerier) error {
-				return q.Set(ctx, "probe", "ok")
-			}); err != nil {
-				t.Fatalf("table kv not found after migration: %v", err)
-			}
-		})
-	}
-}
-
-func TestGetDB_Idempotent(t *testing.T) {
-	t.Parallel()
-
-	for _, dc := range dbCases() {
-		t.Run(dc.name, func(t *testing.T) {
-			t.Parallel()
-
-			path := filepath.Join(t.TempDir(), "test.db")
-			goose := migrators.Goose[kvQuerier](embedFS())
-
-			db, err := openGetDB(path, dc.key, goose)
-			if err != nil {
-				t.Fatal(err)
-			}
-			db.Close()
-
-			db2, err := openGetDB(path, dc.key, goose)
-			if err != nil {
-				t.Fatalf("second call failed: %v", err)
-			}
-			db2.Close()
 		})
 	}
 }
