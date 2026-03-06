@@ -100,6 +100,15 @@ func openGetDB(path string, fsys fs.FS, key []byte) (*sqlflow.DB[kvQuerier], err
 	return sqlflow.GetDB(path, fsys, newQuerier())
 }
 
+// openOpenDB calls OpenDB or OpenEncryptedDB based on whether key is nil.
+func openOpenDB(path string, fsys fs.FS, key []byte) (*sqlflow.DB[kvQuerier], error) {
+	if len(key) > 0 {
+		return sqlflow.OpenEncryptedDB(path, fsys, newQuerier(), key)
+	}
+
+	return sqlflow.OpenDB(path, fsys, newQuerier())
+}
+
 // --- Section 1: Migrations constructors ---
 
 func TestMigrations(t *testing.T) {
@@ -402,39 +411,45 @@ func TestGetEncryptedDB_WrongKey(t *testing.T) {
 	}
 }
 
-// --- Section 5: OpenDB ---
+// --- Section 5: OpenDB / OpenEncryptedDB ---
 
 func TestOpenDB_NewFile(t *testing.T) {
 	t.Parallel()
 
-	for _, mc := range bothMigrations(t) {
-		t.Run(mc.name, func(t *testing.T) {
+	for _, dc := range dbCases() {
+		t.Run(dc.name, func(t *testing.T) {
 			t.Parallel()
 
-			path := filepath.Join(t.TempDir(), "new.db")
-			db, err := sqlflow.OpenDB(path, mc.fsys, newQuerier())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db.Close()
+			for _, mc := range bothMigrations(t) {
+				t.Run(mc.name, func(t *testing.T) {
+					t.Parallel()
 
-			ctx := context.Background()
-			if err := db.Write(ctx, func(q *kvQuerier) error { return q.Set(ctx, "x", "y") }); err != nil {
-				t.Fatal(err)
-			}
+					path := filepath.Join(t.TempDir(), "new.db")
+					db, err := openOpenDB(path, mc.fsys, dc.key)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer db.Close()
 
-			var got string
-			err = db.Read(ctx, func(q *kvQuerier) error {
-				var err error
-				got, err = q.Get(ctx, "x")
-				return err
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
+					ctx := context.Background()
+					if err := db.Write(ctx, func(q *kvQuerier) error { return q.Set(ctx, "x", "y") }); err != nil {
+						t.Fatal(err)
+					}
 
-			if got != "y" {
-				t.Fatalf("got %q want %q", got, "y")
+					var got string
+					err = db.Read(ctx, func(q *kvQuerier) error {
+						var err error
+						got, err = q.Get(ctx, "x")
+						return err
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+
+					if got != "y" {
+						t.Fatalf("got %q want %q", got, "y")
+					}
+				})
 			}
 		})
 	}
@@ -443,40 +458,46 @@ func TestOpenDB_NewFile(t *testing.T) {
 func TestOpenDB_ExistingFile(t *testing.T) {
 	t.Parallel()
 
-	for _, mc := range bothMigrations(t) {
-		t.Run(mc.name, func(t *testing.T) {
+	for _, dc := range dbCases() {
+		t.Run(dc.name, func(t *testing.T) {
 			t.Parallel()
 
-			path := filepath.Join(t.TempDir(), "existing.db")
-			db, err := sqlflow.GetDB(path, mc.fsys, newQuerier())
-			if err != nil {
-				t.Fatal(err)
-			}
-			db.Close()
+			for _, mc := range bothMigrations(t) {
+				t.Run(mc.name, func(t *testing.T) {
+					t.Parallel()
 
-			db2, err := sqlflow.OpenDB(path, mc.fsys, newQuerier())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db2.Close()
+					path := filepath.Join(t.TempDir(), "existing.db")
+					db, err := openGetDB(path, mc.fsys, dc.key)
+					if err != nil {
+						t.Fatal(err)
+					}
+					db.Close()
 
-			ctx := context.Background()
-			if err := db2.Write(ctx, func(q *kvQuerier) error { return q.Set(ctx, "p", "q") }); err != nil {
-				t.Fatal(err)
-			}
+					db2, err := openOpenDB(path, mc.fsys, dc.key)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer db2.Close()
 
-			var got string
-			err = db2.Read(ctx, func(q *kvQuerier) error {
-				var err error
-				got, err = q.Get(ctx, "p")
-				return err
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
+					ctx := context.Background()
+					if err := db2.Write(ctx, func(q *kvQuerier) error { return q.Set(ctx, "p", "q") }); err != nil {
+						t.Fatal(err)
+					}
 
-			if got != "q" {
-				t.Fatalf("got %q want %q", got, "q")
+					var got string
+					err = db2.Read(ctx, func(q *kvQuerier) error {
+						var err error
+						got, err = q.Get(ctx, "p")
+						return err
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+
+					if got != "q" {
+						t.Fatalf("got %q want %q", got, "q")
+					}
+				})
 			}
 		})
 	}
@@ -485,117 +506,35 @@ func TestOpenDB_ExistingFile(t *testing.T) {
 func TestOpenDB_SkipsMigration(t *testing.T) {
 	t.Parallel()
 
-	for _, mc := range bothMigrations(t) {
-		t.Run(mc.name, func(t *testing.T) {
+	for _, dc := range dbCases() {
+		t.Run(dc.name, func(t *testing.T) {
 			t.Parallel()
 
-			path := filepath.Join(t.TempDir(), "skip.db")
-			db, err := sqlflow.GetDB(path, mc.fsys, newQuerier())
-			if err != nil {
-				t.Fatal(err)
-			}
-			db.Close()
+			for _, mc := range bothMigrations(t) {
+				t.Run(mc.name, func(t *testing.T) {
+					t.Parallel()
 
-			// OpenDB on existing file must succeed even with a bad migrations value.
-			badM := os.DirFS("/nonexistent")
-			db2, err := sqlflow.OpenDB(path, badM, newQuerier())
-			if err != nil {
-				t.Fatalf("OpenDB should skip migration for existing file: %v", err)
+					path := filepath.Join(t.TempDir(), "skip.db")
+					db, err := openGetDB(path, mc.fsys, dc.key)
+					if err != nil {
+						t.Fatal(err)
+					}
+					db.Close()
+
+					// OpenDB on existing file must succeed even with a bad migrations value.
+					badM := os.DirFS("/nonexistent")
+					db2, err := openOpenDB(path, badM, dc.key)
+					if err != nil {
+						t.Fatalf("OpenDB should skip migration for existing file: %v", err)
+					}
+					db2.Close()
+				})
 			}
-			db2.Close()
 		})
 	}
 }
 
 // --- Section 6: OpenEncryptedDB ---
-
-func TestOpenEncryptedDB_NewFile(t *testing.T) {
-	t.Parallel()
-
-	key := make([]byte, 32)
-	for i := range key {
-		key[i] = byte(i + 1)
-	}
-
-	for _, mc := range bothMigrations(t) {
-		t.Run(mc.name, func(t *testing.T) {
-			t.Parallel()
-
-			path := filepath.Join(t.TempDir(), "new_enc.db")
-			db, err := sqlflow.OpenEncryptedDB(path, mc.fsys, newQuerier(), key)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db.Close()
-
-			ctx := context.Background()
-			if err := db.Write(ctx, func(q *kvQuerier) error { return q.Set(ctx, "n", "m") }); err != nil {
-				t.Fatal(err)
-			}
-
-			var got string
-			err = db.Read(ctx, func(q *kvQuerier) error {
-				var err error
-				got, err = q.Get(ctx, "n")
-				return err
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			if got != "m" {
-				t.Fatalf("got %q want %q", got, "m")
-			}
-		})
-	}
-}
-
-func TestOpenEncryptedDB_ExistingFile(t *testing.T) {
-	t.Parallel()
-
-	key := make([]byte, 32)
-	for i := range key {
-		key[i] = byte(i + 1)
-	}
-
-	for _, mc := range bothMigrations(t) {
-		t.Run(mc.name, func(t *testing.T) {
-			t.Parallel()
-
-			path := filepath.Join(t.TempDir(), "enc_exist.db")
-			db, err := sqlflow.GetEncryptedDB(path, mc.fsys, newQuerier(), key)
-			if err != nil {
-				t.Fatal(err)
-			}
-			db.Close()
-
-			db2, err := sqlflow.OpenEncryptedDB(path, mc.fsys, newQuerier(), key)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db2.Close()
-
-			ctx := context.Background()
-			if err := db2.Write(ctx, func(q *kvQuerier) error { return q.Set(ctx, "e", "f") }); err != nil {
-				t.Fatal(err)
-			}
-
-			var got string
-			err = db2.Read(ctx, func(q *kvQuerier) error {
-				var err error
-				got, err = q.Get(ctx, "e")
-				return err
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			if got != "f" {
-				t.Fatalf("got %q want %q", got, "f")
-			}
-		})
-	}
-}
 
 func TestOpenEncryptedDB_WrongKey(t *testing.T) {
 	t.Parallel()
