@@ -74,6 +74,32 @@ func bothMigrations(t *testing.T) []migrationCase {
 	}
 }
 
+type dbCase struct {
+	name string
+	key  []byte // nil for plain, non-nil for encrypted
+}
+
+func dbCases() []dbCase {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
+
+	return []dbCase{
+		{name: "plain", key: nil},
+		{name: "encrypted", key: key},
+	}
+}
+
+// openGetDB calls GetDB or GetEncryptedDB based on whether key is nil.
+func openGetDB(path string, fsys fs.FS, key []byte) (*sqlflow.DB[kvQuerier], error) {
+	if len(key) > 0 {
+		return sqlflow.GetEncryptedDB(path, fsys, newQuerier(), key)
+	}
+
+	return sqlflow.GetDB(path, fsys, newQuerier())
+}
+
 // --- Section 1: Migrations constructors ---
 
 func TestMigrations(t *testing.T) {
@@ -175,38 +201,44 @@ func TestTestDB_Panic(t *testing.T) {
 	}
 }
 
-// --- Section 3: GetDB ---
+// --- Section 3: GetDB / GetEncryptedDB ---
 
 func TestGetDB(t *testing.T) {
 	t.Parallel()
 
-	for _, mc := range bothMigrations(t) {
-		t.Run(mc.name, func(t *testing.T) {
+	for _, dc := range dbCases() {
+		t.Run(dc.name, func(t *testing.T) {
 			t.Parallel()
 
-			db, err := sqlflow.GetDB(filepath.Join(t.TempDir(), "test.db"), mc.fsys, newQuerier())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db.Close()
+			for _, mc := range bothMigrations(t) {
+				t.Run(mc.name, func(t *testing.T) {
+					t.Parallel()
 
-			ctx := context.Background()
-			if err := db.Write(ctx, func(q *kvQuerier) error { return q.Set(ctx, "a", "1") }); err != nil {
-				t.Fatal(err)
-			}
+					db, err := openGetDB(filepath.Join(t.TempDir(), "test.db"), mc.fsys, dc.key)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer db.Close()
 
-			var got string
-			err = db.Read(ctx, func(q *kvQuerier) error {
-				var err error
-				got, err = q.Get(ctx, "a")
-				return err
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
+					ctx := context.Background()
+					if err := db.Write(ctx, func(q *kvQuerier) error { return q.Set(ctx, "a", "1") }); err != nil {
+						t.Fatal(err)
+					}
 
-			if got != "1" {
-				t.Fatalf("got %q want %q", got, "1")
+					var got string
+					err = db.Read(ctx, func(q *kvQuerier) error {
+						var err error
+						got, err = q.Get(ctx, "a")
+						return err
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+
+					if got != "1" {
+						t.Fatalf("got %q want %q", got, "1")
+					}
+				})
 			}
 		})
 	}
@@ -215,19 +247,25 @@ func TestGetDB(t *testing.T) {
 func TestGetDB_CreatesDir(t *testing.T) {
 	t.Parallel()
 
-	for _, mc := range bothMigrations(t) {
-		t.Run(mc.name, func(t *testing.T) {
+	for _, dc := range dbCases() {
+		t.Run(dc.name, func(t *testing.T) {
 			t.Parallel()
 
-			path := filepath.Join(t.TempDir(), "sub", "nested", "test.db")
-			db, err := sqlflow.GetDB(path, mc.fsys, newQuerier())
-			if err != nil {
-				t.Fatal(err)
-			}
-			db.Close()
+			for _, mc := range bothMigrations(t) {
+				t.Run(mc.name, func(t *testing.T) {
+					t.Parallel()
 
-			if _, err := os.Stat(filepath.Dir(path)); err != nil {
-				t.Fatalf("directory not created: %v", err)
+					path := filepath.Join(t.TempDir(), "sub", "nested", "test.db")
+					db, err := openGetDB(path, mc.fsys, dc.key)
+					if err != nil {
+						t.Fatal(err)
+					}
+					db.Close()
+
+					if _, err := os.Stat(filepath.Dir(path)); err != nil {
+						t.Fatalf("directory not created: %v", err)
+					}
+				})
 			}
 		})
 	}
@@ -236,27 +274,29 @@ func TestGetDB_CreatesDir(t *testing.T) {
 func TestGetDB_RunsMigrations(t *testing.T) {
 	t.Parallel()
 
-	for _, mc := range bothMigrations(t) {
-		t.Run(mc.name, func(t *testing.T) {
+	for _, dc := range dbCases() {
+		t.Run(dc.name, func(t *testing.T) {
 			t.Parallel()
 
-			path := filepath.Join(t.TempDir(), "test.db")
-			db, err := sqlflow.GetDB(path, mc.fsys, newQuerier())
-			if err != nil {
-				t.Fatal(err)
-			}
-			db.Close()
+			for _, mc := range bothMigrations(t) {
+				t.Run(mc.name, func(t *testing.T) {
+					t.Parallel()
 
-			raw, err := sql.Open("sqlite3", path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer raw.Close()
+					db, err := openGetDB(filepath.Join(t.TempDir(), "test.db"), mc.fsys, dc.key)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer db.Close()
 
-			var name string
-			err = raw.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='kv'`).Scan(&name)
-			if err != nil {
-				t.Fatalf("table kv not found: %v", err)
+					// Verify migrations ran by writing to the kv table; fails if the
+					// table was not created. This works for both plain and encrypted DBs.
+					ctx := context.Background()
+					if err := db.Write(ctx, func(q *kvQuerier) error {
+						return q.Set(ctx, "probe", "ok")
+					}); err != nil {
+						t.Fatalf("table kv not found after migration: %v", err)
+					}
+				})
 			}
 		})
 	}
@@ -265,22 +305,28 @@ func TestGetDB_RunsMigrations(t *testing.T) {
 func TestGetDB_Idempotent(t *testing.T) {
 	t.Parallel()
 
-	for _, mc := range bothMigrations(t) {
-		t.Run(mc.name, func(t *testing.T) {
+	for _, dc := range dbCases() {
+		t.Run(dc.name, func(t *testing.T) {
 			t.Parallel()
 
-			path := filepath.Join(t.TempDir(), "test.db")
-			db, err := sqlflow.GetDB(path, mc.fsys, newQuerier())
-			if err != nil {
-				t.Fatal(err)
-			}
-			db.Close()
+			for _, mc := range bothMigrations(t) {
+				t.Run(mc.name, func(t *testing.T) {
+					t.Parallel()
 
-			db2, err := sqlflow.GetDB(path, mc.fsys, newQuerier())
-			if err != nil {
-				t.Fatalf("second GetDB failed: %v", err)
+					path := filepath.Join(t.TempDir(), "test.db")
+					db, err := openGetDB(path, mc.fsys, dc.key)
+					if err != nil {
+						t.Fatal(err)
+					}
+					db.Close()
+
+					db2, err := openGetDB(path, mc.fsys, dc.key)
+					if err != nil {
+						t.Fatalf("second call failed: %v", err)
+					}
+					db2.Close()
+				})
 			}
-			db2.Close()
 		})
 	}
 }
@@ -288,67 +334,32 @@ func TestGetDB_Idempotent(t *testing.T) {
 func TestGetDB_BadPath(t *testing.T) {
 	t.Parallel()
 
-	for _, mc := range bothMigrations(t) {
-		t.Run(mc.name, func(t *testing.T) {
+	for _, dc := range dbCases() {
+		t.Run(dc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Create a file where a directory is expected.
-			base := t.TempDir()
-			blocker := filepath.Join(base, "blocker")
-			if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
-				t.Fatal(err)
-			}
+			for _, mc := range bothMigrations(t) {
+				t.Run(mc.name, func(t *testing.T) {
+					t.Parallel()
 
-			_, err := sqlflow.GetDB(filepath.Join(blocker, "test.db"), mc.fsys, newQuerier())
-			if err == nil {
-				t.Fatal("expected error, got nil")
+					// Create a file where a directory is expected.
+					base := t.TempDir()
+					blocker := filepath.Join(base, "blocker")
+					if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+
+					_, err := openGetDB(filepath.Join(blocker, "test.db"), mc.fsys, dc.key)
+					if err == nil {
+						t.Fatal("expected error, got nil")
+					}
+				})
 			}
 		})
 	}
 }
 
 // --- Section 4: GetEncryptedDB ---
-
-func TestGetEncryptedDB(t *testing.T) {
-	t.Parallel()
-
-	key := make([]byte, 32)
-	for i := range key {
-		key[i] = byte(i + 1)
-	}
-
-	for _, mc := range bothMigrations(t) {
-		t.Run(mc.name, func(t *testing.T) {
-			t.Parallel()
-
-			path := filepath.Join(t.TempDir(), "enc.db")
-			db, err := sqlflow.GetEncryptedDB(path, mc.fsys, newQuerier(), key)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db.Close()
-
-			ctx := context.Background()
-			if err := db.Write(ctx, func(q *kvQuerier) error { return q.Set(ctx, "secret", "value") }); err != nil {
-				t.Fatal(err)
-			}
-
-			var got string
-			err = db.Read(ctx, func(q *kvQuerier) error {
-				var err error
-				got, err = q.Get(ctx, "secret")
-				return err
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			if got != "value" {
-				t.Fatalf("got %q want %q", got, "value")
-			}
-		})
-	}
-}
 
 func TestGetEncryptedDB_WrongKey(t *testing.T) {
 	t.Parallel()
@@ -386,28 +397,6 @@ func TestGetEncryptedDB_WrongKey(t *testing.T) {
 			})
 			if err == nil {
 				t.Fatal("expected error with wrong key, got nil")
-			}
-		})
-	}
-}
-
-func TestGetEncryptedDB_CreatesDir(t *testing.T) {
-	t.Parallel()
-
-	key := make([]byte, 32)
-	for _, mc := range bothMigrations(t) {
-		t.Run(mc.name, func(t *testing.T) {
-			t.Parallel()
-
-			path := filepath.Join(t.TempDir(), "sub", "enc.db")
-			db, err := sqlflow.GetEncryptedDB(path, mc.fsys, newQuerier(), key)
-			if err != nil {
-				t.Fatal(err)
-			}
-			db.Close()
-
-			if _, err := os.Stat(filepath.Dir(path)); err != nil {
-				t.Fatalf("directory not created: %v", err)
 			}
 		})
 	}
