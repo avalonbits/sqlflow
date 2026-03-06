@@ -1,6 +1,6 @@
 // Package migrators provides migration helpers for sqlflow databases.
 // Each helper returns an options.Option[Q] that can be passed to any
-// sqlflow constructor (GetDB, OpenDB, TestDB, or via WithDBFactory for pools).
+// sqlflow constructor (GetDB, TestDB, or via WithDBFactory for pools).
 package migrators
 
 import (

@@ -5,8 +5,8 @@
 // The two main abstractions are:
 //
 //   - DB[Queries]: a single SQLite database whose per-transaction accessor is Queries.
-//     Use GetDB or OpenDB to open an existing file, or TestDB for an
-//     in-memory database in tests.
+//     Use GetDB to open (or create) a file, or TestDB for an in-memory database
+//     in tests.
 //
 //   - Pool[Queries]: a per-key connection pool where each key (e.g. a user ID) maps
 //     to its own SQLite file on disk. Connections are cached in a ristretto
@@ -16,9 +16,9 @@
 // All database access goes through Read and Write methods, that manage the transaction for
 // the callers.
 //
-// Both types have encrypted variants: use GetEncryptedDB/OpenEncryptedDB and
-// NewEncryptedPool instead of their plain counterparts. The jgiannuzzi fork of
-// go-sqlite3 applies PRAGMA key via the DSN before any other pragmas.
+// Both types have encrypted variants: use GetEncryptedDB and NewEncryptedPool
+// instead of their plain counterparts. The jgiannuzzi fork of go-sqlite3
+// applies PRAGMA key via the DSN before any other pragmas.
 //
 // Migrations are decoupled from the core: pass migrators.Goose(fsys) as an
 // Option to run goose-based schema migrations on open, or implement your own
@@ -183,31 +183,6 @@ func GetDB[Queries any](dbName string, querier Querier[Queries], opts ...Option[
 // run schema migrations.
 func GetEncryptedDB[Queries any](dbName string, querier Querier[Queries], key []byte, opts ...Option[Queries]) (*DB[Queries], error) {
 	return getDB(dbName, querier, key, opts)
-}
-
-// OpenDB opens an existing database without running the OnOpen hook. If the
-// file does not exist yet, it falls back to GetDB (which creates it and fires
-// the OnOpen hook). Use this on the hot path when first-open setup (e.g.
-// schema migrations) has already been completed.
-func OpenDB[Queries any](dbName string, querier Querier[Queries], opts ...Option[Queries]) (*DB[Queries], error) {
-	if _, err := os.Stat(dbName); err != nil {
-		// File doesn't exist — new DB, must create and run OnOpen hook.
-		return getDB(dbName, querier, nil, opts)
-	}
-
-	return openDBConns(dbName, querier, nil, opts)
-}
-
-// OpenEncryptedDB opens an existing SQLCipher-encrypted database without
-// running migrations. If the file does not exist yet, it falls back to
-// GetEncryptedDB (which creates it and fires the OnOpen hook).
-func OpenEncryptedDB[Queries any](dbName string, querier Querier[Queries], key []byte, opts ...Option[Queries]) (*DB[Queries], error) {
-	if _, err := os.Stat(dbName); err != nil {
-		// File doesn't exist — new DB, must create and run OnOpen hook.
-		return getDB(dbName, querier, key, opts)
-	}
-
-	return openDBConns(dbName, querier, key, opts)
 }
 
 // Close calls the OnClose hook (if any) exactly once, then closes both the
