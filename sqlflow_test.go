@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1267,6 +1268,179 @@ func TestNewPool_BadMigration(t *testing.T) {
 				t.Fatal("expected error with bad migration, got nil")
 			}
 		})
+	}
+}
+
+// --- Section 11a: Pool-level DB options (WithDBFactory) ---
+
+func TestPool_WithDBFactory_OnOpen_Called(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var openedPaths []string
+
+	p := sqlflow.TestPool(t.TempDir(), embedFS(), newQuerier(),
+		sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
+			return []sqlflow.Option[kvQuerier]{
+				sqlflow.OnOpen[kvQuerier](func(path string) error {
+					mu.Lock()
+					openedPaths = append(openedPaths, filepath.Base(path))
+					mu.Unlock()
+					return nil
+				}),
+			}
+		}),
+	)
+	defer p.Close()
+
+	ctx := context.Background()
+	for _, k := range []string{"alice", "bob"} {
+		if err := p.Write(ctx, k, func(q *kvQuerier) error { return q.Set(ctx, "x", k) }); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mu.Lock()
+	n := len(openedPaths)
+	mu.Unlock()
+
+	if n != 2 {
+		t.Errorf("OnOpen called %d times, want 2", n)
+	}
+}
+
+func TestPool_WithDBFactory_OnClose_OnEvict(t *testing.T) {
+	t.Parallel()
+
+	var closed bool
+
+	p := sqlflow.TestPool(t.TempDir(), embedFS(), newQuerier(),
+		sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
+			return []sqlflow.Option[kvQuerier]{
+				sqlflow.OnClose[kvQuerier](func() { closed = true }),
+			}
+		}),
+	)
+
+	ctx := context.Background()
+	if err := p.Write(ctx, "alice", func(q *kvQuerier) error { return q.Set(ctx, "k", "v") }); err != nil {
+		t.Fatal(err)
+	}
+
+	p.Evict("alice")
+	p.Wait()
+
+	if !closed {
+		t.Error("OnClose not called after eviction")
+	}
+
+	p.Close()
+}
+
+func TestPool_WithDBFactory_OnClose_OnPoolClose(t *testing.T) {
+	t.Parallel()
+
+	var closed bool
+
+	p := sqlflow.TestPool(t.TempDir(), embedFS(), newQuerier(),
+		sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
+			return []sqlflow.Option[kvQuerier]{
+				sqlflow.OnClose[kvQuerier](func() { closed = true }),
+			}
+		}),
+	)
+
+	ctx := context.Background()
+	if err := p.Write(ctx, "alice", func(q *kvQuerier) error { return q.Set(ctx, "k", "v") }); err != nil {
+		t.Fatal(err)
+	}
+
+	p.Close()
+
+	if !closed {
+		t.Error("OnClose not called after Pool.Close")
+	}
+}
+
+func TestPool_WithDBFactory_FreshStatePerDB(t *testing.T) {
+	t.Parallel()
+
+	// Each DB entry must get its own independent closure state from the factory.
+	// We verify this by tracking per-DB open/close counts; if state were shared,
+	// the counts would collide.
+	type dbState struct{ opens, closes int }
+	var mu sync.Mutex
+	states := map[string]*dbState{}
+
+	p := sqlflow.TestPool(t.TempDir(), embedFS(), newQuerier(),
+		sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
+			// Fresh local var per factory call — one per DB entry.
+			var key string
+			return []sqlflow.Option[kvQuerier]{
+				sqlflow.OnOpen[kvQuerier](func(path string) error {
+					key = strings.TrimSuffix(filepath.Base(path), ".db")
+					mu.Lock()
+					states[key] = &dbState{opens: 1}
+					mu.Unlock()
+					return nil
+				}),
+				sqlflow.OnClose[kvQuerier](func() {
+					mu.Lock()
+					if s, ok := states[key]; ok {
+						s.closes++
+					}
+					mu.Unlock()
+				}),
+			}
+		}),
+	)
+
+	ctx := context.Background()
+	keys := []string{"u1", "u2", "u3"}
+	for _, k := range keys {
+		if err := p.Write(ctx, k, func(q *kvQuerier) error { return q.Set(ctx, "x", k) }); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	p.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	for _, k := range keys {
+		s, ok := states[k]
+		if !ok {
+			t.Errorf("key %q: no state recorded", k)
+			continue
+		}
+		if s.opens != 1 {
+			t.Errorf("key %q: opens=%d, want 1", k, s.opens)
+		}
+		if s.closes != 1 {
+			t.Errorf("key %q: closes=%d, want 1", k, s.closes)
+		}
+	}
+}
+
+func TestPool_WithDBFactory_OnOpen_Error(t *testing.T) {
+	t.Parallel()
+
+	sentinel := errors.New("db open hook failed")
+
+	p := sqlflow.TestPool(t.TempDir(), embedFS(), newQuerier(),
+		sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
+			return []sqlflow.Option[kvQuerier]{
+				sqlflow.OnOpen[kvQuerier](func(string) error { return sentinel }),
+			}
+		}),
+	)
+	defer p.Close()
+
+	ctx := context.Background()
+	err := p.Write(ctx, "alice", func(q *kvQuerier) error { return nil })
+	if !errors.Is(err, sentinel) {
+		t.Errorf("got %v, want sentinel error", err)
 	}
 }
 

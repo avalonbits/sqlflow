@@ -304,6 +304,21 @@ func NoRows(err error) bool {
 // user is not in the in-memory key store.
 var ErrKeyNotAvailable = errors.New("data key not available")
 
+// PoolOption is a functional option that configures a Pool instance at
+// construction time.
+type PoolOption[Q any] func(*Pool[Q])
+
+// WithDBFactory registers a factory that the Pool calls once for each new
+// database entry to produce a fresh, independent set of DB options. Use a
+// factory (rather than a fixed []Option[Q]) so that each opened database gets
+// its own closure state (e.g. its own OS lock-file handle).
+//
+// The factory must return new closures on every invocation; sharing closure
+// state across factory calls will cause data races.
+func WithDBFactory[Q any](factory func() []Option[Q]) PoolOption[Q] {
+	return func(p *Pool[Q]) { p.dbFactory = factory }
+}
+
 // Pool is a per-key connection pool backed by a ristretto cache with TinyLFU
 // eviction. Each key (e.g. user ID) gets its own SQLite database file under
 // dir. When the cache evicts an entry, its DB is closed only after all
@@ -335,6 +350,11 @@ type Pool[Queries any] struct {
 
 	// reapCancel stops the background inactivity reaper goroutine.
 	reapCancel context.CancelFunc
+
+	// dbFactory, if non-nil, is called once per new pool entry to produce a
+	// fresh set of DB options (e.g. per-DB OS lock-file hooks). Each call
+	// must return new closures with independent state.
+	dbFactory func() []Option[Queries]
 }
 
 // Evict immediately removes the pool entry for userID from the cache, closing
@@ -356,9 +376,9 @@ func (p *Pool[Queries]) Wait() {
 // entries idle for longer than the timeout; pass 0 to disable.
 func NewPool[Queries any](
 	dir string, fsys fs.FS, querier Querier[Queries], maxCached int64,
-	inactivityTimeout time.Duration,
+	inactivityTimeout time.Duration, opts ...PoolOption[Queries],
 ) (*Pool[Queries], error) {
-	return newPool(dir, fsys, querier, maxCached, nil, inactivityTimeout)
+	return newPool(dir, fsys, querier, maxCached, nil, inactivityTimeout, opts)
 }
 
 // NewEncryptedPool creates a Pool where each database is encrypted with
@@ -370,15 +390,16 @@ func NewPool[Queries any](
 func NewEncryptedPool[Queries any](
 	dir string, fsys fs.FS, querier Querier[Queries], maxCached int64,
 	keyProvider func(string) ([]byte, bool),
-	inactivityTimeout time.Duration,
+	inactivityTimeout time.Duration, opts ...PoolOption[Queries],
 ) (*Pool[Queries], error) {
-	return newPool(dir, fsys, querier, maxCached, keyProvider, inactivityTimeout)
+	return newPool(dir, fsys, querier, maxCached, keyProvider, inactivityTimeout, opts)
 }
 
 func newPool[Queries any](
 	dir string, fsys fs.FS, querier Querier[Queries], maxCached int64,
 	keyProvider func(string) ([]byte, bool),
 	inactivityTimeout time.Duration,
+	opts []PoolOption[Queries],
 ) (*Pool[Queries], error) {
 	maxCached = max(maxCached, 1000)
 
@@ -395,6 +416,10 @@ func newPool[Queries any](
 		keyProvider:       keyProvider,
 		inactivityTimeout: inactivityTimeout,
 		reapCancel:        cancel,
+	}
+
+	for _, opt := range opts {
+		opt(p)
 	}
 
 	cache, err := newPoolCache[Queries](maxCached)
@@ -422,8 +447,8 @@ func newPool[Queries any](
 // TestPool returns a plain pool backed by dir for tests. Panics on error,
 // matching the TestDB convention. fsys must contain the *.sql migration files
 // at its root.
-func TestPool[Queries any](dir string, fsys fs.FS, querier Querier[Queries]) *Pool[Queries] {
-	p, err := NewPool(dir, fsys, querier, 100_000, 0)
+func TestPool[Queries any](dir string, fsys fs.FS, querier Querier[Queries], opts ...PoolOption[Queries]) *Pool[Queries] {
+	p, err := NewPool(dir, fsys, querier, 100_000, 0, opts...)
 	if err != nil {
 		panic(fmt.Sprintf("creating test pool: %v", err))
 	}
@@ -645,7 +670,12 @@ func (p *Pool[Queries]) getOrCreate(key string) (*poolEntry[Queries], error) {
 		dbKey = k
 	}
 
-	newDB, err := getDB(dbPath, p.fsys, p.querier, dbKey, nil)
+	var dbOpts []Option[Queries]
+	if p.dbFactory != nil {
+		dbOpts = p.dbFactory()
+	}
+
+	newDB, err := getDB(dbPath, p.fsys, p.querier, dbKey, dbOpts)
 	if err != nil {
 		return nil, fmt.Errorf("opening db for %q: %w", key, err)
 	}
