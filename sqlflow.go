@@ -20,8 +20,9 @@
 // NewEncryptedPool instead of their plain counterparts. The jgiannuzzi fork of
 // go-sqlite3 applies PRAGMA key via the DSN before any other pragmas.
 //
-// Migrations are handled by goose. Pass an fs.FS whose root contains the *.sql
-// migration files directly (no subdirectory). Use embed.FS or os.DirFS.
+// Migrations are decoupled from the core: pass migrators.Goose(fsys) as an
+// Option to run goose-based schema migrations on open, or implement your own
+// OnOpen hook for any other migration tool.
 package sqlflow
 
 import (
@@ -30,7 +31,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,7 +40,8 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/dgraph-io/ristretto/v2"
-	"github.com/pressly/goose/v3"
+
+	"github.com/avalonbits/sqlflow/options"
 
 	sqlite3lib "github.com/mattn/go-sqlite3"
 )
@@ -58,26 +59,42 @@ type DBTX interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-// Option is a functional option that configures a DB instance. Options are
-// applied after all connections are open, before the DB is returned to the
-// caller. Passing no options is always valid.
-type Option[Q any] func(*DB[Q])
+// Option is an alias for options.Option[Q]. It is a functional option that
+// configures a DB instance. Passing no options is always valid.
+type Option[Q any] = options.Option[Q]
 
-// OnOpen registers fn to be called with the database file path once all
-// connections are established and the DB is ready for use. If fn returns a
-// non-nil error, the connections are closed and the error is propagated from
-// the constructor.
+// PoolOption is an alias for options.PoolOption[Q]. It configures a Pool
+// instance at construction time.
+type PoolOption[Q any] = options.PoolOption[Q]
+
+// OnOpen registers fn to be called with the database file path and the live
+// write connection once all connections are established and the DB is ready for
+// use. If fn returns a non-nil error, the connections are closed and the error
+// is propagated from the constructor.
 //
+// Multiple OnOpen options chain: each fn runs in registration order.
 // For in-memory databases created by TestDB the path is ":memory:".
-func OnOpen[Q any](fn func(path string) error) Option[Q] {
-	return func(db *DB[Q]) { db.onOpen = fn }
+func OnOpen[Q any](fn func(path string, db *sql.DB) error) Option[Q] {
+	return options.OnOpen[Q](fn)
 }
 
 // OnClose registers fn to be called after both database connections are
-// closed. fn fires at most once even if Close is called multiple times. Use
-// OnClose to release resources tied to this DB's lifetime (e.g. lock files).
+// closed. Multiple OnClose options chain in registration order.
+// fn fires at most once even if Close is called multiple times. Use OnClose
+// to release resources tied to this DB's lifetime (e.g. lock files).
 func OnClose[Q any](fn func()) Option[Q] {
-	return func(db *DB[Q]) { db.onClose = fn }
+	return options.OnClose[Q](fn)
+}
+
+// WithDBFactory registers a factory that the Pool calls once for each new
+// database entry to produce a fresh, independent set of DB options. Use a
+// factory (rather than a fixed []Option[Q]) so that each opened database gets
+// its own closure state (e.g. its own OS lock-file handle or migrator).
+//
+// The factory must return new closures on every invocation; sharing closure
+// state across factory calls will cause data races.
+func WithDBFactory[Q any](factory func() []Option[Q]) PoolOption[Q] {
+	return options.WithDBFactory[Q](factory)
 }
 
 // DB is a SQLite database handle parameterised by a per-transaction accessor type
@@ -114,71 +131,68 @@ type DB[Queries any] struct {
 	// for in-memory test databases.
 	path string
 
-	// onOpen is called with path once all connections are ready. A non-nil
-	// error aborts the open and the connections are closed.
-	onOpen func(string) error
+	// cfg holds the lifecycle callbacks applied via Option values.
+	cfg options.Config[Queries]
 
-	// onClose is called exactly once when Close is invoked.
-	onClose func()
-
-	// closeOnce ensures onClose fires at most once across multiple Close calls.
+	// closeOnce ensures cfg.OnCloseFn fires at most once across multiple Close calls.
 	closeOnce sync.Once
 }
 
-// TestDB creates an in-memory SQLite database, runs migrations from fsys, and
-// returns a DB ready for use in tests.
+// TestDB creates an in-memory SQLite database and returns a DB ready for use
+// in tests. Pass migrators.Goose(fsys) as an option to apply schema migrations.
 //
 // Panics on any error so test setup stays concise.
-// fsys must contain the *.sql migration files at its root.
-func TestDB[Queries any](fsys fs.FS, querier Querier[Queries], opts ...Option[Queries]) *DB[Queries] {
+func TestDB[Queries any](querier Querier[Queries], opts ...Option[Queries]) *DB[Queries] {
 	conn, err := sql.Open("sqlite3", fmt.Sprintf(writeDSN, ":memory:"))
 	if err != nil {
 		panic(err)
 	}
 	conn.SetMaxOpenConns(1)
 
-	if err := migrate(conn, fsys); err != nil {
-		conn.Close()
-		panic(err)
-	}
-
-	db := &DB[Queries]{querier: querier, rddb: conn, mu: &sync.Mutex{}, wrdb: conn, backoffRetries: 1, path: ":memory:"}
-
+	var cfg options.Config[Queries]
 	for _, opt := range opts {
-		opt(db)
+		opt(&cfg)
 	}
 
-	if db.onOpen != nil {
-		if err := db.onOpen(":memory:"); err != nil {
+	if cfg.OnOpenFn != nil {
+		if err := cfg.OnOpenFn(":memory:", conn); err != nil {
 			conn.Close()
 			panic(fmt.Sprintf("onOpen hook: %v", err))
 		}
 	}
 
-	return db
+	return &DB[Queries]{
+		querier:        querier,
+		rddb:           conn,
+		mu:             &sync.Mutex{},
+		wrdb:           conn,
+		backoffRetries: 1,
+		path:           ":memory:",
+		cfg:            cfg,
+	}
 }
 
-// GetDB opens (or creates) the SQLite database at dbName, runs all pending
-// migrations from fsys, and returns an open DB.
-// fsys must contain the *.sq; migration files at its root.
-func GetDB[Queries any](dbName string, fsys fs.FS, querier Querier[Queries], opts ...Option[Queries]) (*DB[Queries], error) {
-	return getDB(dbName, fsys, querier, nil, opts)
+// GetDB opens (or creates) the SQLite database at dbName and returns an open DB.
+// Pass migrators.Goose(fsys) as an option to run schema migrations.
+func GetDB[Queries any](dbName string, querier Querier[Queries], opts ...Option[Queries]) (*DB[Queries], error) {
+	return getDB(dbName, querier, nil, opts)
 }
 
 // GetEncryptedDB opens (or creates) the SQLCipher-encrypted SQLite database at
-// dbName, runs all pending migrations from fsys, and returns an open DB.
-func GetEncryptedDB[Queries any](dbName string, fsys fs.FS, querier Querier[Queries], key []byte, opts ...Option[Queries]) (*DB[Queries], error) {
-	return getDB(dbName, fsys, querier, key, opts)
+// dbName and returns an open DB. Pass migrators.Goose(fsys) as an option to
+// run schema migrations.
+func GetEncryptedDB[Queries any](dbName string, querier Querier[Queries], key []byte, opts ...Option[Queries]) (*DB[Queries], error) {
+	return getDB(dbName, querier, key, opts)
 }
 
 // OpenDB opens an existing database without running migrations. If the file
-// does not exist yet, it falls back to GetDB (which creates and migrates it).
-// Use this on the hot path when migrations have already been applied (e.g.
-// via MigrateAll at startup).
-func OpenDB[Queries any](dbName string, fsys fs.FS, querier Querier[Queries], opts ...Option[Queries]) (*DB[Queries], error) {
+// does not exist yet, it falls back to GetDB (which creates it and fires the
+// OnOpen hook). Use this on the hot path when migrations have already been
+// applied (e.g. via MigrateAll at startup).
+func OpenDB[Queries any](dbName string, querier Querier[Queries], opts ...Option[Queries]) (*DB[Queries], error) {
 	if _, err := os.Stat(dbName); err != nil {
-		// File doesn't exist — new DB, must create and migrate.
-		return getDB(dbName, fsys, querier, nil, opts)
+		// File doesn't exist — new DB, must create and run OnOpen hook.
+		return getDB(dbName, querier, nil, opts)
 	}
 
 	return openDBConns(dbName, querier, nil, opts)
@@ -186,39 +200,12 @@ func OpenDB[Queries any](dbName string, fsys fs.FS, querier Querier[Queries], op
 
 // OpenEncryptedDB opens an existing SQLCipher-encrypted database without
 // running migrations. If the file does not exist yet, it falls back to
-// GetEncryptedDB (which creates and migrates it).
-func OpenEncryptedDB[Queries any](dbName string, fsys fs.FS, querier Querier[Queries], key []byte, opts ...Option[Queries]) (*DB[Queries], error) {
+// GetEncryptedDB (which creates it and fires the OnOpen hook).
+func OpenEncryptedDB[Queries any](dbName string, querier Querier[Queries], key []byte, opts ...Option[Queries]) (*DB[Queries], error) {
 	if _, err := os.Stat(dbName); err != nil {
-		// File doesn't exist — new DB, must create and migrate.
-		return getDB(dbName, fsys, querier, key, opts)
+		// File doesn't exist — new DB, must create and run OnOpen hook.
+		return getDB(dbName, querier, key, opts)
 	}
-
-	return openDBConns(dbName, querier, key, opts)
-}
-
-func getDB[Queries any](dbName string, fsys fs.FS, querier Querier[Queries], key []byte, opts []Option[Queries]) (*DB[Queries], error) {
-	if err := os.MkdirAll(filepath.Dir(dbName), 0o755); err != nil {
-		return nil, fmt.Errorf("creating db dir: %w", err)
-	}
-
-	var db *sql.DB
-	var err error
-
-	if len(key) > 0 {
-		db, err = sql.Open("sqlite3", cipherWriteDSNFor(dbName, key))
-	} else {
-		db, err = sql.Open("sqlite3", fmt.Sprintf(writeDSN, dbName))
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	if err := migrate(db, fsys); err != nil {
-		db.Close()
-
-		return nil, err
-	}
-	db.Close()
 
 	return openDBConns(dbName, querier, key, opts)
 }
@@ -228,8 +215,8 @@ func getDB[Queries any](dbName string, fsys fs.FS, querier Querier[Queries], key
 // to complete before returning.
 func (db *DB[Queries]) Close() error {
 	db.closeOnce.Do(func() {
-		if db.onClose != nil {
-			db.onClose()
+		if db.cfg.OnCloseFn != nil {
+			db.cfg.OnCloseFn()
 		}
 	})
 
@@ -304,21 +291,6 @@ func NoRows(err error) bool {
 // user is not in the in-memory key store.
 var ErrKeyNotAvailable = errors.New("data key not available")
 
-// PoolOption is a functional option that configures a Pool instance at
-// construction time.
-type PoolOption[Q any] func(*Pool[Q])
-
-// WithDBFactory registers a factory that the Pool calls once for each new
-// database entry to produce a fresh, independent set of DB options. Use a
-// factory (rather than a fixed []Option[Q]) so that each opened database gets
-// its own closure state (e.g. its own OS lock-file handle).
-//
-// The factory must return new closures on every invocation; sharing closure
-// state across factory calls will cause data races.
-func WithDBFactory[Q any](factory func() []Option[Q]) PoolOption[Q] {
-	return func(p *Pool[Q]) { p.dbFactory = factory }
-}
-
 // Pool is a per-key connection pool backed by a ristretto cache with TinyLFU
 // eviction. Each key (e.g. user ID) gets its own SQLite database file under
 // dir. When the cache evicts an entry, its DB is closed only after all
@@ -326,9 +298,6 @@ func WithDBFactory[Q any](factory func() []Option[Q]) PoolOption[Q] {
 type Pool[Queries any] struct {
 	// dir is the directory under which per-key *.db files are stored.
 	dir string
-
-	// fsys is the fs.FS whose root contains the goose migration *.sql files.
-	fsys fs.FS
 
 	// querier constructs the per-transaction accessor for each opened DB.
 	querier Querier[Queries]
@@ -352,9 +321,47 @@ type Pool[Queries any] struct {
 	reapCancel context.CancelFunc
 
 	// dbFactory, if non-nil, is called once per new pool entry to produce a
-	// fresh set of DB options (e.g. per-DB OS lock-file hooks). Each call
-	// must return new closures with independent state.
+	// fresh set of DB options (e.g. per-DB migration hooks or OS lock-file
+	// handles). Each call must return new closures with independent state.
 	dbFactory func() []Option[Queries]
+}
+
+// NewPool creates a plain (unencrypted) Pool backed by on-disk SQLite
+// databases. maxCached controls the maximum number of open databases kept in
+// the cache (minimum 1000). inactivityTimeout, if > 0, starts a background
+// reaper that evicts entries idle for longer than the timeout; pass 0 to
+// disable. Pass options.WithDBFactory(func() []Option[Q]{migrators.Goose(fsys)})
+// to apply schema migrations on first open.
+func NewPool[Queries any](
+	dir string, querier Querier[Queries], maxCached int64,
+	inactivityTimeout time.Duration, opts ...PoolOption[Queries],
+) (*Pool[Queries], error) {
+	return newPool(dir, querier, maxCached, nil, inactivityTimeout, opts)
+}
+
+// NewEncryptedPool creates a Pool where each database is encrypted with
+// SQLCipher. keyProvider is called with the pool key (e.g. user ID) each time
+// a database is opened; it must return the 32-byte encryption key and true, or
+// false if the key is unavailable (causing Read/Write to return
+// ErrKeyNotAvailable). Migration for encrypted databases is lazy: it runs on
+// first open when the data key is available.
+func NewEncryptedPool[Queries any](
+	dir string, querier Querier[Queries], maxCached int64,
+	keyProvider func(string) ([]byte, bool),
+	inactivityTimeout time.Duration, opts ...PoolOption[Queries],
+) (*Pool[Queries], error) {
+	return newPool(dir, querier, maxCached, keyProvider, inactivityTimeout, opts)
+}
+
+// TestPool returns a plain pool backed by dir for tests. Panics on error,
+// matching the TestDB convention.
+func TestPool[Queries any](dir string, querier Querier[Queries], opts ...PoolOption[Queries]) *Pool[Queries] {
+	p, err := NewPool(dir, querier, 100_000, 0, opts...)
+	if err != nil {
+		panic(fmt.Sprintf("creating test pool: %v", err))
+	}
+
+	return p
 }
 
 // Evict immediately removes the pool entry for userID from the cache, closing
@@ -367,93 +374,6 @@ func (p *Pool[Queries]) Evict(userID string) {
 // Wait blocks until all pending cache evictions have been processed.
 func (p *Pool[Queries]) Wait() {
 	p.cache.Wait()
-}
-
-// NewPool creates a plain (unencrypted) Pool backed by on-disk SQLite
-// databases. fsys must contain the *.sql migration files at its root. maxCached
-// controls the maximum number of open databases kept in the cache (minimum
-// 1000). inactivityTimeout, if > 0, starts a background reaper that evicts
-// entries idle for longer than the timeout; pass 0 to disable.
-func NewPool[Queries any](
-	dir string, fsys fs.FS, querier Querier[Queries], maxCached int64,
-	inactivityTimeout time.Duration, opts ...PoolOption[Queries],
-) (*Pool[Queries], error) {
-	return newPool(dir, fsys, querier, maxCached, nil, inactivityTimeout, opts)
-}
-
-// NewEncryptedPool creates a Pool where each database is encrypted with
-// SQLCipher. keyProvider is called with the pool key (e.g. user ID) each time
-// a database is opened; it must return the 32-byte encryption key and true, or
-// false if the key is unavailable (causing Read/Write to return
-// ErrKeyNotAvailable). Migration for encrypted databases is lazy: it runs on
-// first open when the data key is available.
-func NewEncryptedPool[Queries any](
-	dir string, fsys fs.FS, querier Querier[Queries], maxCached int64,
-	keyProvider func(string) ([]byte, bool),
-	inactivityTimeout time.Duration, opts ...PoolOption[Queries],
-) (*Pool[Queries], error) {
-	return newPool(dir, fsys, querier, maxCached, keyProvider, inactivityTimeout, opts)
-}
-
-func newPool[Queries any](
-	dir string, fsys fs.FS, querier Querier[Queries], maxCached int64,
-	keyProvider func(string) ([]byte, bool),
-	inactivityTimeout time.Duration,
-	opts []PoolOption[Queries],
-) (*Pool[Queries], error) {
-	maxCached = max(maxCached, 1000)
-
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("creating pool dir: %w", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	p := &Pool[Queries]{
-		dir:               dir,
-		fsys:              fsys,
-		querier:           querier,
-		keyProvider:       keyProvider,
-		inactivityTimeout: inactivityTimeout,
-		reapCancel:        cancel,
-	}
-
-	for _, opt := range opts {
-		opt(p)
-	}
-
-	cache, err := newPoolCache[Queries](maxCached)
-	if err != nil {
-		cancel()
-
-		return nil, fmt.Errorf("creating pool cache: %w", err)
-	}
-	p.cache = cache
-
-	if err := p.MigrateAll(); err != nil {
-		cancel()
-		p.cache.Close()
-
-		return nil, fmt.Errorf("migrating existing databases: %w", err)
-	}
-
-	if inactivityTimeout > 0 {
-		go p.runInactivityReaper(ctx)
-	}
-
-	return p, nil
-}
-
-// TestPool returns a plain pool backed by dir for tests. Panics on error,
-// matching the TestDB convention. fsys must contain the *.sql migration files
-// at its root.
-func TestPool[Queries any](dir string, fsys fs.FS, querier Querier[Queries], opts ...PoolOption[Queries]) *Pool[Queries] {
-	p, err := NewPool(dir, fsys, querier, 100_000, 0, opts...)
-	if err != nil {
-		panic(fmt.Sprintf("creating test pool: %v", err))
-	}
-
-	return p
 }
 
 // Read acquires the database for key and executes f inside a read-only
@@ -482,9 +402,10 @@ func (p *Pool[Queries]) Write(ctx context.Context, key string, f func(*Queries) 
 	return entry.db.Write(ctx, f)
 }
 
-// MigrateAll opens every *.db file under dir, runs migrations, and closes.
-// If a keyProvider is configured, migration is skipped (lazy per-DB migration
-// happens in getOrCreate when the data key is available).
+// MigrateAll opens every *.db file under dir, fires the OnOpen hook (e.g. for
+// schema migrations), and closes. If a keyProvider is configured, migration is
+// skipped (lazy per-DB migration happens in getOrCreate when the data key is
+// available).
 func (p *Pool[Queries]) MigrateAll() error {
 	if p.keyProvider != nil {
 		return nil
@@ -496,15 +417,16 @@ func (p *Pool[Queries]) MigrateAll() error {
 	}
 
 	for _, path := range matches {
-		db, err := sql.Open("sqlite3", fmt.Sprintf(writeDSN, path))
-		if err != nil {
-			return fmt.Errorf("opening %s for migration: %w", path, err)
+		var opts []Option[Queries]
+		if p.dbFactory != nil {
+			opts = p.dbFactory()
 		}
-		if err := migrate(db, p.fsys); err != nil {
-			db.Close()
 
+		db, err := openDBConns(path, p.querier, nil, opts)
+		if err != nil {
 			return fmt.Errorf("migrating %s: %w", path, err)
 		}
+
 		db.Close()
 	}
 
@@ -551,6 +473,64 @@ func (p *Pool[Queries]) Close() error {
 	return errors.Join(errs...)
 }
 
+func getDB[Queries any](dbName string, querier Querier[Queries], key []byte, opts []Option[Queries]) (*DB[Queries], error) {
+	if err := os.MkdirAll(filepath.Dir(dbName), 0o755); err != nil {
+		return nil, fmt.Errorf("creating db dir: %w", err)
+	}
+
+	return openDBConns(dbName, querier, key, opts)
+}
+
+func newPool[Queries any](
+	dir string, querier Querier[Queries], maxCached int64,
+	keyProvider func(string) ([]byte, bool),
+	inactivityTimeout time.Duration,
+	opts []PoolOption[Queries],
+) (*Pool[Queries], error) {
+	maxCached = max(maxCached, 1000)
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("creating pool dir: %w", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var poolCfg options.PoolConfig[Queries]
+	for _, opt := range opts {
+		opt(&poolCfg)
+	}
+
+	p := &Pool[Queries]{
+		dir:               dir,
+		querier:           querier,
+		keyProvider:       keyProvider,
+		inactivityTimeout: inactivityTimeout,
+		reapCancel:        cancel,
+		dbFactory:         poolCfg.DBFactory,
+	}
+
+	cache, err := newPoolCache[Queries](maxCached)
+	if err != nil {
+		cancel()
+
+		return nil, fmt.Errorf("creating pool cache: %w", err)
+	}
+	p.cache = cache
+
+	if err := p.MigrateAll(); err != nil {
+		cancel()
+		p.cache.Close()
+
+		return nil, fmt.Errorf("migrating existing databases: %w", err)
+	}
+
+	if inactivityTimeout > 0 {
+		go p.runInactivityReaper(ctx)
+	}
+
+	return p, nil
+}
+
 func openDBConns[Queries any](dbName string, querier Querier[Queries], key []byte, opts []Option[Queries]) (*DB[Queries], error) {
 	var rDSN, wDSN string
 
@@ -575,22 +555,29 @@ func openDBConns[Queries any](dbName string, querier Querier[Queries], key []byt
 		return nil, err
 	}
 
-	db := &DB[Queries]{querier: querier, rddb: rddb, mu: &sync.Mutex{}, wrdb: wrdb, backoffRetries: 5, path: dbName}
-
+	var cfg options.Config[Queries]
 	for _, opt := range opts {
-		opt(db)
+		opt(&cfg)
 	}
 
-	if db.onOpen != nil {
-		if err := db.onOpen(dbName); err != nil {
-			db.rddb.Close()
-			db.wrdb.Close()
+	if cfg.OnOpenFn != nil {
+		if err := cfg.OnOpenFn(dbName, wrdb); err != nil {
+			rddb.Close()
+			wrdb.Close()
 
 			return nil, fmt.Errorf("onOpen hook for %q: %w", dbName, err)
 		}
 	}
 
-	return db, nil
+	return &DB[Queries]{
+		querier:        querier,
+		rddb:           rddb,
+		mu:             &sync.Mutex{},
+		wrdb:           wrdb,
+		backoffRetries: 5,
+		path:           dbName,
+		cfg:            cfg,
+	}, nil
 }
 
 // runInactivityReaper periodically evicts pool entries that have been idle
@@ -675,7 +662,7 @@ func (p *Pool[Queries]) getOrCreate(key string) (*poolEntry[Queries], error) {
 		dbOpts = p.dbFactory()
 	}
 
-	newDB, err := getDB(dbPath, p.fsys, p.querier, dbKey, dbOpts)
+	newDB, err := getDB(dbPath, p.querier, dbKey, dbOpts)
 	if err != nil {
 		return nil, fmt.Errorf("opening db for %q: %w", key, err)
 	}
@@ -763,8 +750,6 @@ func newPoolCache[Queries any](maxCached int64) (*ristretto.Cache[string, *poolE
 	})
 }
 
-var gooseMu sync.Mutex
-
 const (
 	readDSN  = "%s?_journal=wal&_sync=1&_busy_timeout=5000&_cache_size=10000&_txlock=deferred"
 	writeDSN = "%s?_journal=wal&_sync=1&_busy_timeout=5000&_cache_size=10000&_txlock=immediate"
@@ -780,18 +765,6 @@ func cipherWriteDSNFor(path string, key []byte) string {
 
 func cipherReadDSNFor(path string, key []byte) string {
 	return path + "?_key=x%27" + hex.EncodeToString(key) + "%27&_cipher=sqlcipher&_journal=wal&_sync=1&_busy_timeout=5000&_cache_size=10000&_txlock=deferred"
-}
-
-func migrate(db *sql.DB, fsys fs.FS) error {
-	gooseMu.Lock()
-	defer gooseMu.Unlock()
-
-	goose.SetBaseFS(fsys)
-	if err := goose.SetDialect("sqlite"); err != nil {
-		return err
-	}
-
-	return goose.Up(db, ".")
 }
 
 func (db *DB[Queries]) transaction(ctx context.Context, rdbms *sql.DB, f func(*Queries) error) error {
