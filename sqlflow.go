@@ -57,43 +57,6 @@ type DBTX interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-type openFnList []func(path string, db *sql.DB) error
-
-func (olf openFnList) run(path string, db *sql.DB) error {
-	for _, fn := range olf {
-		if err := fn(path, db); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-type closeFnList []func()
-
-func (clf closeFnList) run() {
-	for _, fn := range clf {
-		fn()
-	}
-}
-
-func collectHooks(opts []Option) (openFnList, closeFnList) {
-	var onOpen openFnList
-	var onClose closeFnList
-
-	for _, opt := range opts {
-		if opt.onOpen != nil {
-			onOpen = append(onOpen, opt.onOpen)
-		}
-
-		if opt.onClose != nil {
-			onClose = append(onClose, opt.onClose)
-		}
-	}
-
-	return onOpen, onClose
-}
-
 // Option carries a single lifecycle hook for a DB instance. Construct one
 // with OnOpen or OnClose; passing no options is always valid.
 type Option struct {
@@ -336,7 +299,7 @@ type Pool[Queries any] struct {
 // databases. maxCached controls the maximum number of open databases kept in
 // the cache (minimum 1000). inactivityTimeout, if > 0, starts a background
 // reaper that evicts entries idle for longer than the timeout; pass 0 to
-// disable. Pass options.WithDBFactory(func() []Option[Q]{migrators.Goose(fsys)})
+// disable. Pass WithDBFactory(func() []Option{migrators.Goose(fsys)})
 // to apply schema migrations on first open.
 func NewPool[Queries any](
 	dir string, querier Querier[Queries], maxCached int64,
@@ -446,6 +409,43 @@ func (p *Pool[Queries]) Close() error {
 	p.cache.Close()
 
 	return errors.Join(errs...)
+}
+
+type openFnList []func(path string, db *sql.DB) error
+
+func (olf openFnList) run(path string, db *sql.DB) error {
+	for _, fn := range olf {
+		if err := fn(path, db); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+type closeFnList []func()
+
+func (clf closeFnList) run() {
+	for _, fn := range clf {
+		fn()
+	}
+}
+
+func collectHooks(opts []Option) (openFnList, closeFnList) {
+	var onOpen openFnList
+	var onClose closeFnList
+
+	for _, opt := range opts {
+		if opt.onOpen != nil {
+			onOpen = append(onOpen, opt.onOpen)
+		}
+
+		if opt.onClose != nil {
+			onClose = append(onClose, opt.onClose)
+		}
+	}
+
+	return onOpen, onClose
 }
 
 func getDB[Queries any](dbName string, querier Querier[Queries], key []byte, opts []Option) (*DB[Queries], error) {
@@ -668,8 +668,6 @@ type poolEntry[Queries any] struct {
 	once sync.Once
 }
 
-// acquire increments the reference count. Returns false if the entry is being
-// evicted, in which case the caller should obtain a fresh entry.
 func (e *poolEntry[Queries]) acquire() bool {
 	e.refs.Add(1)
 	if e.closing.Load() {
@@ -681,8 +679,6 @@ func (e *poolEntry[Queries]) acquire() bool {
 	return true
 }
 
-// release decrements the reference count. If the entry has been evicted and
-// this is the last reference, it closes the database.
 func (e *poolEntry[Queries]) release() {
 	if e.refs.Add(-1) == 0 && e.closing.Load() {
 		e.once.Do(func() {
@@ -691,8 +687,6 @@ func (e *poolEntry[Queries]) release() {
 	}
 }
 
-// evict marks the entry for closure. If no references are held, the database
-// is closed immediately; otherwise the last release handles it.
 func (e *poolEntry[Queries]) evict() {
 	e.closing.Store(true)
 	if e.refs.Load() == 0 {
