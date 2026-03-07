@@ -656,7 +656,7 @@ func TestDB_OnClose_Called(t *testing.T) {
 				filepath.Join(t.TempDir(), "close.db"),
 				dc.key,
 				migrators.Goose(embedFS()),
-				sqlflow.OnClose(func() { called = true }),
+				sqlflow.OnClose(func(_ string, _ *sql.DB) { called = true }),
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -679,7 +679,7 @@ func TestDB_OnClose_CalledOnceOnDoubleClose(t *testing.T) {
 		filepath.Join(t.TempDir(), "twice.db"),
 		nil,
 		migrators.Goose(embedFS()),
-		sqlflow.OnClose(func() { count++ }),
+		sqlflow.OnClose(func(_ string, _ *sql.DB) { count++ }),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -698,7 +698,7 @@ func TestTestDB_OnClose_Called(t *testing.T) {
 
 	var called bool
 	db := sqlflow.TestDB(newQuerier(),
-		sqlflow.OnClose(func() { called = true }),
+		sqlflow.OnClose(func(_ string, _ *sql.DB) { called = true }),
 	)
 
 	db.Close() //nolint
@@ -708,12 +708,11 @@ func TestTestDB_OnClose_Called(t *testing.T) {
 	}
 }
 
-func TestDB_OnOpen_OnClose_SharedState(t *testing.T) {
+func TestDB_OnClose_ReceivesPath(t *testing.T) {
 	t.Parallel()
 
-	// Verify that a closure can share state between OnOpen and OnClose.
-	var openedPath string
-	var closedPath string
+	// Verify that OnClose receives the same path that was passed to OnOpen.
+	var openedPath, closedPath string
 
 	db, err := openDB(
 		filepath.Join(t.TempDir(), "shared.db"),
@@ -723,7 +722,7 @@ func TestDB_OnOpen_OnClose_SharedState(t *testing.T) {
 			openedPath = p
 			return nil
 		}),
-		sqlflow.OnClose(func() { closedPath = openedPath }),
+		sqlflow.OnClose(func(p string, _ *sql.DB) { closedPath = p }),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -731,8 +730,8 @@ func TestDB_OnOpen_OnClose_SharedState(t *testing.T) {
 
 	db.Close()
 
-	if closedPath == "" {
-		t.Error("OnClose did not see state set by OnOpen")
+	if closedPath == "" || closedPath != openedPath {
+		t.Errorf("OnClose path %q does not match OnOpen path %q", closedPath, openedPath)
 	}
 }
 
@@ -863,7 +862,7 @@ func TestPool_OnClose_OnEvict(t *testing.T) {
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
 		gooseOpt(),
-		sqlflow.OnClose(func() { closed = true }),
+		sqlflow.OnClose(func(_ string, _ *sql.DB) { closed = true }),
 	)
 
 	ctx := context.Background()
@@ -888,7 +887,7 @@ func TestPool_OnClose_OnPoolClose(t *testing.T) {
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
 		gooseOpt(),
-		sqlflow.OnClose(func() { closed = true }),
+		sqlflow.OnClose(func(_ string, _ *sql.DB) { closed = true }),
 	)
 
 	ctx := context.Background()

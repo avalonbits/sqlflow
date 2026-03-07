@@ -144,7 +144,7 @@ func OpenEncryptedDB[Queries any](dbName string, querier Querier[Queries], key [
 // with OnOpen or OnClose; passing no options is always valid.
 type Option struct {
 	onOpen  func(path string, db *sql.DB) error
-	onClose func()
+	onClose func(path string, db *sql.DB)
 }
 
 // OnOpen registers fn to be called with the database file path and the live
@@ -159,10 +159,11 @@ func OnOpen(fn func(path string, db *sql.DB) error) Option {
 }
 
 // OnClose registers fn to be called after both database connections are
-// closed. Multiple OnClose options run in registration order.
+// closed. fn receives the database file path and the (now-closed) write
+// connection. Multiple OnClose options run in registration order.
 // fn fires at most once even if Close is called multiple times. Use OnClose
 // to release resources tied to this DB's lifetime (e.g. lock files).
-func OnClose(fn func()) Option {
+func OnClose(fn func(path string, db *sql.DB)) Option {
 	return Option{onClose: fn}
 }
 
@@ -170,7 +171,7 @@ func OnClose(fn func()) Option {
 // read and write database connections. It waits for any in-flight operations
 // to complete before returning.
 func (db *DB[Queries]) Close() error {
-	db.closeOnce.Do(db.onClose.run)
+	db.closeOnce.Do(func() { db.onClose.run(db.path, db.wrdb) })
 
 	return errors.Join(db.rddb.Close(), db.wrdb.Close())
 }
@@ -404,11 +405,11 @@ func (olf openFnList) run(path string, db *sql.DB) error {
 	return nil
 }
 
-type closeFnList []func()
+type closeFnList []func(path string, db *sql.DB)
 
-func (clf closeFnList) run() {
+func (clf closeFnList) run(path string, db *sql.DB) {
 	for _, fn := range clf {
-		fn()
+		fn(path, db)
 	}
 }
 
