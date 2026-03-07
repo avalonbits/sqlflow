@@ -77,55 +77,53 @@ func (clf closeFnList) run() {
 	}
 }
 
-// config holds the per-DB lifecycle callbacks assembled from Option[Q] values.
-// Multiple OnOpen / OnClose options registered on the same DB are chained in
-// registration order.
-type config struct {
-	// onOpenFn is called with the database file path and the live write
-	// connection after all connections are established. A non-nil return aborts
-	// the open and closes the connections.
-	onOpenFn openFnList
+func collectHooks(opts []Option) (openFnList, closeFnList) {
+	var onOpen openFnList
+	var onClose closeFnList
 
-	// onCloseFn is called exactly once when the DB is closed.
-	onCloseFn closeFnList
+	for _, opt := range opts {
+		if opt.onOpen != nil {
+			onOpen = append(onOpen, opt.onOpen)
+		}
+
+		if opt.onClose != nil {
+			onClose = append(onClose, opt.onClose)
+		}
+	}
+
+	return onOpen, onClose
 }
 
-// Option is a functional option that configures a DB instance.
-// Passing no options is always valid.
-type Option func(*config)
+// Option carries a single lifecycle hook for a DB instance. Construct one
+// with OnOpen or OnClose; passing no options is always valid.
+type Option struct {
+	onOpen  func(path string, db *sql.DB) error
+	onClose func()
+}
 
-// poolConfig holds pool-level options assembled from PoolOption values.
-type poolConfig struct {
-	// dbFactory is called once per new pool entry to produce a fresh,
-	// independent set of DB options.
+// PoolOption carries a single pool-level configuration value. Construct one
+// with WithDBFactory.
+type PoolOption struct {
 	dbFactory func() []Option
 }
-
-// PoolOption is a functional option that configures a Pool instance at
-// construction time.
-type PoolOption func(*poolConfig)
 
 // OnOpen registers fn to be called with the database file path and the live
 // write connection once all connections are established and the DB is ready for
 // use. If fn returns a non-nil error, the connections are closed and the error
 // is propagated from the constructor.
 //
-// Multiple OnOpen options chain: each fn runs in registration order.
+// Multiple OnOpen options run in registration order.
 // For in-memory databases created by TestDB the path is ":memory:".
 func OnOpen(fn func(path string, db *sql.DB) error) Option {
-	return func(c *config) {
-		c.onOpenFn = append(c.onOpenFn, fn)
-	}
+	return Option{onOpen: fn}
 }
 
 // OnClose registers fn to be called after both database connections are
-// closed. Multiple OnClose options chain in registration order.
+// closed. Multiple OnClose options run in registration order.
 // fn fires at most once even if Close is called multiple times. Use OnClose
 // to release resources tied to this DB's lifetime (e.g. lock files).
 func OnClose(fn func()) Option {
-	return func(c *config) {
-		c.onCloseFn = append(c.onCloseFn, fn)
-	}
+	return Option{onClose: fn}
 }
 
 // WithDBFactory registers a factory that the Pool calls once for each new
@@ -136,7 +134,7 @@ func OnClose(fn func()) Option {
 // The factory must return new closures on every invocation; sharing closure
 // state across factory calls will cause data races.
 func WithDBFactory(factory func() []Option) PoolOption {
-	return func(c *poolConfig) { c.dbFactory = factory }
+	return PoolOption{dbFactory: factory}
 }
 
 // DB is a SQLite database handle parameterised by a per-transaction accessor type
@@ -173,10 +171,10 @@ type DB[Queries any] struct {
 	// for in-memory test databases.
 	path string
 
-	// cfg holds the lifecycle callbacks applied via Option values.
-	cfg config
+	// onClose holds the registered close hooks, fired at most once on Close.
+	onClose closeFnList
 
-	// closeOnce ensures cfg.OnCloseFn fires at most once across multiple Close calls.
+	// closeOnce ensures onClose fires at most once across multiple Close calls.
 	closeOnce sync.Once
 }
 
@@ -191,12 +189,9 @@ func TestDB[Queries any](querier Querier[Queries], opts ...Option) *DB[Queries] 
 	}
 	conn.SetMaxOpenConns(1)
 
-	var cfg config
-	for _, opt := range opts {
-		opt(&cfg)
-	}
+	onOpen, onClose := collectHooks(opts)
 
-	if err := cfg.onOpenFn.run(":memory:", conn); err != nil {
+	if err := onOpen.run(":memory:", conn); err != nil {
 		conn.Close()
 		panic(fmt.Sprintf("onOpen hook: %v", err))
 	}
@@ -208,7 +203,7 @@ func TestDB[Queries any](querier Querier[Queries], opts ...Option) *DB[Queries] 
 		wrdb:           conn,
 		backoffRetries: 1,
 		path:           ":memory:",
-		cfg:            cfg,
+		onClose:        onClose,
 	}
 }
 
@@ -229,7 +224,7 @@ func GetEncryptedDB[Queries any](dbName string, querier Querier[Queries], key []
 // read and write database connections. It waits for any in-flight operations
 // to complete before returning.
 func (db *DB[Queries]) Close() error {
-	db.closeOnce.Do(db.cfg.onCloseFn.run)
+	db.closeOnce.Do(db.onClose.run)
 
 	return errors.Join(db.rddb.Close(), db.wrdb.Close())
 }
@@ -475,9 +470,11 @@ func newPool[Queries any](
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	var poolCfg poolConfig
+	var dbFactory func() []Option
 	for _, opt := range opts {
-		opt(&poolCfg)
+		if opt.dbFactory != nil {
+			dbFactory = opt.dbFactory
+		}
 	}
 
 	p := &Pool[Queries]{
@@ -486,7 +483,7 @@ func newPool[Queries any](
 		keyProvider:       keyProvider,
 		inactivityTimeout: inactivityTimeout,
 		reapCancel:        cancel,
-		dbFactory:         poolCfg.dbFactory,
+		dbFactory:         dbFactory,
 	}
 
 	cache, err := newPoolCache[Queries](maxCached)
@@ -528,12 +525,9 @@ func openDBConns[Queries any](dbName string, querier Querier[Queries], key []byt
 		return nil, err
 	}
 
-	var cfg config
-	for _, opt := range opts {
-		opt(&cfg)
-	}
+	onOpen, onClose := collectHooks(opts)
 
-	if err := cfg.onOpenFn.run(dbName, wrdb); err != nil {
+	if err := onOpen.run(dbName, wrdb); err != nil {
 		rddb.Close()
 		wrdb.Close()
 
@@ -547,7 +541,7 @@ func openDBConns[Queries any](dbName string, querier Querier[Queries], key []byt
 		wrdb:           wrdb,
 		backoffRetries: 5,
 		path:           dbName,
-		cfg:            cfg,
+		onClose:        onClose,
 	}, nil
 }
 
