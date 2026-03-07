@@ -5,7 +5,7 @@
 // The two main abstractions are:
 //
 //   - DB[Queries]: a single SQLite database whose per-transaction accessor is Queries.
-//     Use GetDB to open (or create) a file, or TestDB for an in-memory database
+//     Use OpenDB to open (or create) a file, or TestDB for an in-memory database
 //     in tests.
 //
 //   - Pool[Queries]: a per-key connection pool where each key (e.g. a user ID) maps
@@ -16,7 +16,7 @@
 // All database access goes through Read and Write methods, that manage the transaction for
 // the callers.
 //
-// Both types have encrypted variants: use GetEncryptedDB and NewEncryptedPool
+// Both types have encrypted variants: use OpenEncryptedDB and NewEncryptedPool
 // instead of their plain counterparts. The jgiannuzzi fork of go-sqlite3
 // applies PRAGMA key via the DSN before any other pragmas.
 //
@@ -127,17 +127,17 @@ func TestDB[Queries any](querier Querier[Queries], opts ...Option) *DB[Queries] 
 	}
 }
 
-// GetDB opens (or creates) the SQLite database at dbName and returns an open DB.
+// OpenDB opens (or creates) the SQLite database at dbName and returns an open DB.
 // Pass migrators.Goose(fsys) as an option to run schema migrations.
-func GetDB[Queries any](dbName string, querier Querier[Queries], opts ...Option) (*DB[Queries], error) {
-	return getDB(dbName, querier, nil, opts)
+func OpenDB[Queries any](dbName string, querier Querier[Queries], opts ...Option) (*DB[Queries], error) {
+	return openDB(dbName, querier, nil, opts)
 }
 
-// GetEncryptedDB opens (or creates) the SQLCipher-encrypted SQLite database at
+// OpenEncryptedDB opens (or creates) the SQLCipher-encrypted SQLite database at
 // dbName and returns an open DB. Pass migrators.Goose(fsys) as an option to
 // run schema migrations.
-func GetEncryptedDB[Queries any](dbName string, querier Querier[Queries], key []byte, opts ...Option) (*DB[Queries], error) {
-	return getDB(dbName, querier, key, opts)
+func OpenEncryptedDB[Queries any](dbName string, querier Querier[Queries], key []byte, opts ...Option) (*DB[Queries], error) {
+	return openDB(dbName, querier, key, opts)
 }
 
 // Option carries a single lifecycle hook for a DB instance. Construct one
@@ -448,7 +448,7 @@ func collectHooks(opts []Option) (openFnList, closeFnList) {
 	return onOpen, onClose
 }
 
-func getDB[Queries any](dbName string, querier Querier[Queries], key []byte, opts []Option) (*DB[Queries], error) {
+func openDB[Queries any](dbName string, querier Querier[Queries], key []byte, opts []Option) (*DB[Queries], error) {
 	if err := os.MkdirAll(filepath.Dir(dbName), 0o755); err != nil {
 		return nil, fmt.Errorf("creating db dir: %w", err)
 	}
@@ -627,7 +627,7 @@ func (p *Pool[Queries]) getOrCreate(key string) (*poolEntry[Queries], error) {
 		dbOpts = p.dbFactory()
 	}
 
-	newDB, err := getDB(dbPath, p.querier, dbKey, dbOpts)
+	newDB, err := openDB(dbPath, p.querier, dbKey, dbOpts)
 	if err != nil {
 		return nil, fmt.Errorf("opening db for %q: %w", key, err)
 	}

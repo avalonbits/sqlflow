@@ -81,13 +81,13 @@ func dbCases() []dbCase {
 	}
 }
 
-// openGetDB calls GetDB or GetEncryptedDB based on whether key is nil.
-func openGetDB(path string, key []byte, opts ...sqlflow.Option) (*sqlflow.DB[kvQuerier], error) {
+// openGetDB calls OpenDB or OpenEncryptedDB based on whether key is nil.
+func openDB(path string, key []byte, opts ...sqlflow.Option) (*sqlflow.DB[kvQuerier], error) {
 	if len(key) > 0 {
-		return sqlflow.GetEncryptedDB(path, newQuerier(), key, opts...)
+		return sqlflow.OpenEncryptedDB(path, newQuerier(), key, opts...)
 	}
 
-	return sqlflow.GetDB(path, newQuerier(), opts...)
+	return sqlflow.OpenDB(path, newQuerier(), opts...)
 }
 
 // --- Section 1: Migrations constructors ---
@@ -120,16 +120,16 @@ func TestTestDB(t *testing.T) {
 	}
 }
 
-// --- Section 3: GetDB / GetEncryptedDB ---
+// --- Section 3: OpenDB / OpenEncryptedDB ---
 
-func TestGetDB(t *testing.T) {
+func TestOpenDB(t *testing.T) {
 	t.Parallel()
 
 	for _, dc := range dbCases() {
 		t.Run(dc.name, func(t *testing.T) {
 			t.Parallel()
 
-			db, err := openGetDB(filepath.Join(t.TempDir(), "test.db"), dc.key, migrators.Goose(embedFS()))
+			db, err := openDB(filepath.Join(t.TempDir(), "test.db"), dc.key, migrators.Goose(embedFS()))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -165,7 +165,7 @@ func TestGetDB_CreatesDir(t *testing.T) {
 			t.Parallel()
 
 			path := filepath.Join(t.TempDir(), "sub", "nested", "test.db")
-			db, err := openGetDB(path, dc.key, migrators.Goose(embedFS()))
+			db, err := openDB(path, dc.key, migrators.Goose(embedFS()))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -192,7 +192,7 @@ func TestGetDB_BadPath(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			_, err := openGetDB(filepath.Join(blocker, "test.db"), dc.key, migrators.Goose(embedFS()))
+			_, err := openDB(filepath.Join(blocker, "test.db"), dc.key, migrators.Goose(embedFS()))
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -200,9 +200,9 @@ func TestGetDB_BadPath(t *testing.T) {
 	}
 }
 
-// --- Section 4: GetEncryptedDB ---
+// --- Section 4: OpenEncryptedDB ---
 
-func TestGetEncryptedDB_WrongKey(t *testing.T) {
+func TestOpenEncryptedDB_WrongKey(t *testing.T) {
 	t.Parallel()
 
 	goodKey := make([]byte, 32)
@@ -215,13 +215,13 @@ func TestGetEncryptedDB_WrongKey(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "enc.db")
-	db, err := sqlflow.GetEncryptedDB(path, newQuerier(), goodKey, migrators.Goose(embedFS()))
+	db, err := sqlflow.OpenEncryptedDB(path, newQuerier(), goodKey, migrators.Goose(embedFS()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 
-	db2, err := sqlflow.GetEncryptedDB(path, newQuerier(), badKey)
+	db2, err := sqlflow.OpenEncryptedDB(path, newQuerier(), badKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -501,7 +501,7 @@ func TestDB_Checkpoint(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			db, err := sqlflow.GetDB(
+			db, err := sqlflow.OpenDB(
 				filepath.Join(t.TempDir(), "ckpt.db"),
 				newQuerier(),
 				migrators.Goose(embedFS()),
@@ -576,7 +576,7 @@ func TestDB_OnOpen_Called(t *testing.T) {
 
 			path := filepath.Join(t.TempDir(), "hooks.db")
 			var gotPath string
-			db, err := openGetDB(path, dc.key,
+			db, err := openDB(path, dc.key,
 				migrators.Goose(embedFS()),
 				sqlflow.OnOpen(func(p string, _ *sql.DB) error {
 					gotPath = p
@@ -604,7 +604,7 @@ func TestDB_OnOpen_Error(t *testing.T) {
 
 			sentinel := errors.New("open hook failed")
 			path := filepath.Join(t.TempDir(), "err.db")
-			_, err := openGetDB(path, dc.key,
+			_, err := openDB(path, dc.key,
 				sqlflow.OnOpen(func(string, *sql.DB) error { return sentinel }),
 			)
 			if !errors.Is(err, sentinel) {
@@ -655,7 +655,7 @@ func TestDB_OnClose_Called(t *testing.T) {
 			t.Parallel()
 
 			var called bool
-			db, err := openGetDB(
+			db, err := openDB(
 				filepath.Join(t.TempDir(), "close.db"),
 				dc.key,
 				migrators.Goose(embedFS()),
@@ -678,7 +678,7 @@ func TestDB_OnClose_CalledOnceOnDoubleClose(t *testing.T) {
 	t.Parallel()
 
 	var count int
-	db, err := openGetDB(
+	db, err := openDB(
 		filepath.Join(t.TempDir(), "twice.db"),
 		nil,
 		migrators.Goose(embedFS()),
@@ -718,7 +718,7 @@ func TestDB_OnOpen_OnClose_SharedState(t *testing.T) {
 	var openedPath string
 	var closedPath string
 
-	db, err := openGetDB(
+	db, err := openDB(
 		filepath.Join(t.TempDir(), "shared.db"),
 		nil,
 		migrators.Goose(embedFS()),

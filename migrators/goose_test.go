@@ -72,13 +72,13 @@ func TestGoose_Idempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.db")
 	gooseOpt := migrators.Goose(embedFS())
 
-	db1, err := sqlflow.GetDB(path, newTestQuerier(), gooseOpt)
+	db1, err := sqlflow.OpenDB(path, newTestQuerier(), gooseOpt)
 	if err != nil {
 		t.Fatal(err)
 	}
 	db1.Close()
 
-	db2, err := sqlflow.GetDB(path, newTestQuerier(), gooseOpt)
+	db2, err := sqlflow.OpenDB(path, newTestQuerier(), gooseOpt)
 	if err != nil {
 		t.Fatalf("second open after migration: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestGoose_BadFS(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := sqlflow.GetDB(
+			_, err := sqlflow.OpenDB(
 				filepath.Join(t.TempDir(), "test.db"),
 				newTestQuerier(),
 				migrators.Goose(tc.fsys),

@@ -48,7 +48,7 @@ To enable it, replace the standard `go-sqlite3` driver with the
 replace github.com/mattn/go-sqlite3 => github.com/jgiannuzzi/go-sqlite3 v1.14.35-0.20260227142656-2c447b9a2806
 ```
 
-Then use `GetEncryptedDB` / `OpenEncryptedDB` (single database) or pass a
+Then use `OpenDB` / `OpenEncryptedDB` (single database) or pass a
 `keyProvider` to `NewEncryptedPool` (per-key pool). Both accept a 32-byte key; sqlflow
 passes it to the driver via DSN parameters at open time.
 
@@ -109,7 +109,7 @@ var querier sqlflow.Querier[Queries] = New
 ### Migrations
 
 sqlflow uses [goose](https://github.com/pressly/goose) for migrations. Every
-open function (`GetDB`, `NewPool`, …) runs all pending migrations automatically
+open function (`OpenDB`, `NewPool`, …) runs all pending migrations automatically
 before returning. Migrations are supplied as an `fs.FS` whose root contains the
 `*.sql` files directly — no subdirectory.
 
@@ -134,9 +134,8 @@ DROP TABLE ...`)},
 
 ### Single database — `DB[Q]`
 
-`GetDB` creates the file and any parent directories, runs all pending goose
+`OpenDB` creates the file and any parent directories, runs all pending goose
 migrations, then opens separate read and write connections in WAL mode.
-Use `OpenDB` on the hot path to skip migrations when the file already exists.
 
 ### Per-key connection pool — `Pool[Q]`
 
@@ -179,7 +178,7 @@ func main() {
 	path := "/tmp/plain.db"
 	os.Remove(path)
 
-	db, err := sqlflow.GetDB(path, migrations, newKV)
+	db, err := sqlflow.OpenDB(path, migrations, newKV)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -264,7 +263,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	db, err := sqlflow.GetEncryptedDB(path, migrations, newKV, key)
+	db, err := sqlflow.OpenEncryptedDB(path, migrations, newKV, key)
 	if err != nil {
 		log.Fatal(err)
 	}
