@@ -57,49 +57,6 @@ type DBTX interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-// Option carries a single lifecycle hook for a DB instance. Construct one
-// with OnOpen or OnClose; passing no options is always valid.
-type Option struct {
-	onOpen  func(path string, db *sql.DB) error
-	onClose func()
-}
-
-// PoolOption carries a single pool-level configuration value. Construct one
-// with WithDBFactory.
-type PoolOption struct {
-	dbFactory func() []Option
-}
-
-// OnOpen registers fn to be called with the database file path and the live
-// write connection once all connections are established and the DB is ready for
-// use. If fn returns a non-nil error, the connections are closed and the error
-// is propagated from the constructor.
-//
-// Multiple OnOpen options run in registration order.
-// For in-memory databases created by TestDB the path is ":memory:".
-func OnOpen(fn func(path string, db *sql.DB) error) Option {
-	return Option{onOpen: fn}
-}
-
-// OnClose registers fn to be called after both database connections are
-// closed. Multiple OnClose options run in registration order.
-// fn fires at most once even if Close is called multiple times. Use OnClose
-// to release resources tied to this DB's lifetime (e.g. lock files).
-func OnClose(fn func()) Option {
-	return Option{onClose: fn}
-}
-
-// WithDBFactory registers a factory that the Pool calls once for each new
-// database entry to produce a fresh, independent set of DB options. Use a
-// factory (rather than a fixed []Option) so that each opened database gets
-// its own closure state (e.g. its own OS lock-file handle or migrator).
-//
-// The factory must return new closures on every invocation; sharing closure
-// state across factory calls will cause data races.
-func WithDBFactory(factory func() []Option) PoolOption {
-	return PoolOption{dbFactory: factory}
-}
-
 // DB is a SQLite database handle parameterised by a per-transaction accessor type
 // Queries. It maintains two underlying sql.DB connections:
 //
@@ -181,6 +138,49 @@ func GetDB[Queries any](dbName string, querier Querier[Queries], opts ...Option)
 // run schema migrations.
 func GetEncryptedDB[Queries any](dbName string, querier Querier[Queries], key []byte, opts ...Option) (*DB[Queries], error) {
 	return getDB(dbName, querier, key, opts)
+}
+
+// Option carries a single lifecycle hook for a DB instance. Construct one
+// with OnOpen or OnClose; passing no options is always valid.
+type Option struct {
+	onOpen  func(path string, db *sql.DB) error
+	onClose func()
+}
+
+// PoolOption carries a single pool-level configuration value. Construct one
+// with WithDBFactory.
+type PoolOption struct {
+	dbFactory func() []Option
+}
+
+// OnOpen registers fn to be called with the database file path and the live
+// write connection once all connections are established and the DB is ready for
+// use. If fn returns a non-nil error, the connections are closed and the error
+// is propagated from the constructor.
+//
+// Multiple OnOpen options run in registration order.
+// For in-memory databases created by TestDB the path is ":memory:".
+func OnOpen(fn func(path string, db *sql.DB) error) Option {
+	return Option{onOpen: fn}
+}
+
+// OnClose registers fn to be called after both database connections are
+// closed. Multiple OnClose options run in registration order.
+// fn fires at most once even if Close is called multiple times. Use OnClose
+// to release resources tied to this DB's lifetime (e.g. lock files).
+func OnClose(fn func()) Option {
+	return Option{onClose: fn}
+}
+
+// WithDBFactory registers a factory that the Pool calls once for each new
+// database entry to produce a fresh, independent set of DB options. Use a
+// factory (rather than a fixed []Option) so that each opened database gets
+// its own closure state (e.g. its own OS lock-file handle or migrator).
+//
+// The factory must return new closures on every invocation; sharing closure
+// state across factory calls will cause data races.
+func WithDBFactory(factory func() []Option) PoolOption {
+	return PoolOption{dbFactory: factory}
 }
 
 // Close calls the OnClose hook (if any) exactly once, then closes both the
