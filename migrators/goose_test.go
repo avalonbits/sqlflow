@@ -38,7 +38,7 @@ func newTestQuerier() sqlflow.Querier[testQuerier] {
 func TestGoose_EmbedFS(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newTestQuerier(), migrators.Goose[testQuerier](embedFS()))
+	db := sqlflow.TestDB(newTestQuerier(), migrators.Goose(embedFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -53,7 +53,7 @@ func TestGoose_EmbedFS(t *testing.T) {
 func TestGoose_DirFS(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newTestQuerier(), migrators.Goose[testQuerier](dirFS()))
+	db := sqlflow.TestDB(newTestQuerier(), migrators.Goose(dirFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -70,7 +70,7 @@ func TestGoose_Idempotent(t *testing.T) {
 
 	// Opening the same DB file twice with Goose must succeed (no-op second run).
 	path := filepath.Join(t.TempDir(), "test.db")
-	gooseOpt := migrators.Goose[testQuerier](embedFS())
+	gooseOpt := migrators.Goose(embedFS())
 
 	db1, err := sqlflow.GetDB(path, newTestQuerier(), gooseOpt)
 	if err != nil {
@@ -101,7 +101,7 @@ func TestGoose_BadFS(t *testing.T) {
 			_, err := sqlflow.GetDB(
 				filepath.Join(t.TempDir(), "test.db"),
 				newTestQuerier(),
-				migrators.Goose[testQuerier](tc.fsys),
+				migrators.Goose(tc.fsys),
 			)
 			if err == nil {
 				t.Fatal("expected error with bad FS, got nil")

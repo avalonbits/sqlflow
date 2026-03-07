@@ -60,7 +60,7 @@ type DBTX interface {
 // config holds the per-DB lifecycle callbacks assembled from Option[Q] values.
 // Multiple OnOpen / OnClose options registered on the same DB are chained in
 // registration order.
-type config[Q any] struct {
+type config struct {
 	// onOpenFn is called with the database file path and the live write
 	// connection after all connections are established. A non-nil return aborts
 	// the open and closes the connections.
@@ -72,18 +72,18 @@ type config[Q any] struct {
 
 // Option is a functional option that configures a DB instance.
 // Passing no options is always valid.
-type Option[Q any] func(*config[Q])
+type Option func(*config)
 
-// poolConfig holds pool-level options assembled from PoolOption[Q] values.
-type poolConfig[Q any] struct {
+// poolConfig holds pool-level options assembled from PoolOption values.
+type poolConfig struct {
 	// dbFactory is called once per new pool entry to produce a fresh,
 	// independent set of DB options.
-	dbFactory func() []Option[Q]
+	dbFactory func() []Option
 }
 
 // PoolOption is a functional option that configures a Pool instance at
 // construction time.
-type PoolOption[Q any] func(*poolConfig[Q])
+type PoolOption func(*poolConfig)
 
 // OnOpen registers fn to be called with the database file path and the live
 // write connection once all connections are established and the DB is ready for
@@ -92,8 +92,8 @@ type PoolOption[Q any] func(*poolConfig[Q])
 //
 // Multiple OnOpen options chain: each fn runs in registration order.
 // For in-memory databases created by TestDB the path is ":memory:".
-func OnOpen[Q any](fn func(path string, db *sql.DB) error) Option[Q] {
-	return func(c *config[Q]) {
+func OnOpen(fn func(path string, db *sql.DB) error) Option {
+	return func(c *config) {
 		if c.onOpenFn == nil {
 			c.onOpenFn = fn
 
@@ -115,8 +115,8 @@ func OnOpen[Q any](fn func(path string, db *sql.DB) error) Option[Q] {
 // closed. Multiple OnClose options chain in registration order.
 // fn fires at most once even if Close is called multiple times. Use OnClose
 // to release resources tied to this DB's lifetime (e.g. lock files).
-func OnClose[Q any](fn func()) Option[Q] {
-	return func(c *config[Q]) {
+func OnClose(fn func()) Option {
+	return func(c *config) {
 		if c.onCloseFn == nil {
 			c.onCloseFn = fn
 
@@ -133,13 +133,13 @@ func OnClose[Q any](fn func()) Option[Q] {
 
 // WithDBFactory registers a factory that the Pool calls once for each new
 // database entry to produce a fresh, independent set of DB options. Use a
-// factory (rather than a fixed []Option[Q]) so that each opened database gets
+// factory (rather than a fixed []Option) so that each opened database gets
 // its own closure state (e.g. its own OS lock-file handle or migrator).
 //
 // The factory must return new closures on every invocation; sharing closure
 // state across factory calls will cause data races.
-func WithDBFactory[Q any](factory func() []Option[Q]) PoolOption[Q] {
-	return func(c *poolConfig[Q]) { c.dbFactory = factory }
+func WithDBFactory(factory func() []Option) PoolOption {
+	return func(c *poolConfig) { c.dbFactory = factory }
 }
 
 // DB is a SQLite database handle parameterised by a per-transaction accessor type
@@ -177,7 +177,7 @@ type DB[Queries any] struct {
 	path string
 
 	// cfg holds the lifecycle callbacks applied via Option values.
-	cfg config[Queries]
+	cfg config
 
 	// closeOnce ensures cfg.OnCloseFn fires at most once across multiple Close calls.
 	closeOnce sync.Once
@@ -187,14 +187,14 @@ type DB[Queries any] struct {
 // in tests. Pass migrators.Goose(fsys) as an option to apply schema migrations.
 //
 // Panics on any error so test setup stays concise.
-func TestDB[Queries any](querier Querier[Queries], opts ...Option[Queries]) *DB[Queries] {
+func TestDB[Queries any](querier Querier[Queries], opts ...Option) *DB[Queries] {
 	conn, err := sql.Open("sqlite3", fmt.Sprintf(writeDSN, ":memory:"))
 	if err != nil {
 		panic(err)
 	}
 	conn.SetMaxOpenConns(1)
 
-	var cfg config[Queries]
+	var cfg config
 	for _, opt := range opts {
 		opt(&cfg)
 	}
@@ -219,14 +219,14 @@ func TestDB[Queries any](querier Querier[Queries], opts ...Option[Queries]) *DB[
 
 // GetDB opens (or creates) the SQLite database at dbName and returns an open DB.
 // Pass migrators.Goose(fsys) as an option to run schema migrations.
-func GetDB[Queries any](dbName string, querier Querier[Queries], opts ...Option[Queries]) (*DB[Queries], error) {
+func GetDB[Queries any](dbName string, querier Querier[Queries], opts ...Option) (*DB[Queries], error) {
 	return getDB(dbName, querier, nil, opts)
 }
 
 // GetEncryptedDB opens (or creates) the SQLCipher-encrypted SQLite database at
 // dbName and returns an open DB. Pass migrators.Goose(fsys) as an option to
 // run schema migrations.
-func GetEncryptedDB[Queries any](dbName string, querier Querier[Queries], key []byte, opts ...Option[Queries]) (*DB[Queries], error) {
+func GetEncryptedDB[Queries any](dbName string, querier Querier[Queries], key []byte, opts ...Option) (*DB[Queries], error) {
 	return getDB(dbName, querier, key, opts)
 }
 
@@ -343,7 +343,7 @@ type Pool[Queries any] struct {
 	// dbFactory, if non-nil, is called once per new pool entry to produce a
 	// fresh set of DB options (e.g. per-DB migration hooks or OS lock-file
 	// handles). Each call must return new closures with independent state.
-	dbFactory func() []Option[Queries]
+	dbFactory func() []Option
 }
 
 // NewPool creates a plain (unencrypted) Pool backed by on-disk SQLite
@@ -354,7 +354,7 @@ type Pool[Queries any] struct {
 // to apply schema migrations on first open.
 func NewPool[Queries any](
 	dir string, querier Querier[Queries], maxCached int64,
-	inactivityTimeout time.Duration, opts ...PoolOption[Queries],
+	inactivityTimeout time.Duration, opts ...PoolOption,
 ) (*Pool[Queries], error) {
 	return newPool(dir, querier, maxCached, nil, inactivityTimeout, opts)
 }
@@ -368,14 +368,14 @@ func NewPool[Queries any](
 func NewEncryptedPool[Queries any](
 	dir string, querier Querier[Queries], maxCached int64,
 	keyProvider func(string) ([]byte, bool),
-	inactivityTimeout time.Duration, opts ...PoolOption[Queries],
+	inactivityTimeout time.Duration, opts ...PoolOption,
 ) (*Pool[Queries], error) {
 	return newPool(dir, querier, maxCached, keyProvider, inactivityTimeout, opts)
 }
 
 // TestPool returns a plain pool backed by dir for tests. Panics on error,
 // matching the TestDB convention.
-func TestPool[Queries any](dir string, querier Querier[Queries], opts ...PoolOption[Queries]) *Pool[Queries] {
+func TestPool[Queries any](dir string, querier Querier[Queries], opts ...PoolOption) *Pool[Queries] {
 	p, err := NewPool(dir, querier, 100_000, 0, opts...)
 	if err != nil {
 		panic(fmt.Sprintf("creating test pool: %v", err))
@@ -462,7 +462,7 @@ func (p *Pool[Queries]) Close() error {
 	return errors.Join(errs...)
 }
 
-func getDB[Queries any](dbName string, querier Querier[Queries], key []byte, opts []Option[Queries]) (*DB[Queries], error) {
+func getDB[Queries any](dbName string, querier Querier[Queries], key []byte, opts []Option) (*DB[Queries], error) {
 	if err := os.MkdirAll(filepath.Dir(dbName), 0o755); err != nil {
 		return nil, fmt.Errorf("creating db dir: %w", err)
 	}
@@ -474,7 +474,7 @@ func newPool[Queries any](
 	dir string, querier Querier[Queries], maxCached int64,
 	keyProvider func(string) ([]byte, bool),
 	inactivityTimeout time.Duration,
-	opts []PoolOption[Queries],
+	opts []PoolOption,
 ) (*Pool[Queries], error) {
 	maxCached = max(maxCached, 1000)
 
@@ -484,7 +484,7 @@ func newPool[Queries any](
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	var poolCfg poolConfig[Queries]
+	var poolCfg poolConfig
 	for _, opt := range opts {
 		opt(&poolCfg)
 	}
@@ -513,7 +513,7 @@ func newPool[Queries any](
 	return p, nil
 }
 
-func openDBConns[Queries any](dbName string, querier Querier[Queries], key []byte, opts []Option[Queries]) (*DB[Queries], error) {
+func openDBConns[Queries any](dbName string, querier Querier[Queries], key []byte, opts []Option) (*DB[Queries], error) {
 	var rDSN, wDSN string
 
 	if len(key) > 0 {
@@ -537,7 +537,7 @@ func openDBConns[Queries any](dbName string, querier Querier[Queries], key []byt
 		return nil, err
 	}
 
-	var cfg config[Queries]
+	var cfg config
 	for _, opt := range opts {
 		opt(&cfg)
 	}
@@ -639,7 +639,7 @@ func (p *Pool[Queries]) getOrCreate(key string) (*poolEntry[Queries], error) {
 		dbKey = k
 	}
 
-	var dbOpts []Option[Queries]
+	var dbOpts []Option
 	if p.dbFactory != nil {
 		dbOpts = p.dbFactory()
 	}

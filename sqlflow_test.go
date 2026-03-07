@@ -58,9 +58,9 @@ func newQuerier() sqlflow.Querier[kvQuerier] {
 }
 
 // goosePoolOpt returns a pool option that runs goose migrations from embedFS.
-func goosePoolOpt() sqlflow.PoolOption[kvQuerier] {
-	return sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
-		return []sqlflow.Option[kvQuerier]{migrators.Goose[kvQuerier](embedFS())}
+func goosePoolOpt() sqlflow.PoolOption {
+	return sqlflow.WithDBFactory(func() []sqlflow.Option {
+		return []sqlflow.Option{migrators.Goose(embedFS())}
 	})
 }
 
@@ -82,7 +82,7 @@ func dbCases() []dbCase {
 }
 
 // openGetDB calls GetDB or GetEncryptedDB based on whether key is nil.
-func openGetDB(path string, key []byte, opts ...sqlflow.Option[kvQuerier]) (*sqlflow.DB[kvQuerier], error) {
+func openGetDB(path string, key []byte, opts ...sqlflow.Option) (*sqlflow.DB[kvQuerier], error) {
 	if len(key) > 0 {
 		return sqlflow.GetEncryptedDB(path, newQuerier(), key, opts...)
 	}
@@ -97,7 +97,7 @@ func openGetDB(path string, key []byte, opts ...sqlflow.Option[kvQuerier]) (*sql
 func TestTestDB(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose[kvQuerier](embedFS()))
+	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -129,7 +129,7 @@ func TestGetDB(t *testing.T) {
 		t.Run(dc.name, func(t *testing.T) {
 			t.Parallel()
 
-			db, err := openGetDB(filepath.Join(t.TempDir(), "test.db"), dc.key, migrators.Goose[kvQuerier](embedFS()))
+			db, err := openGetDB(filepath.Join(t.TempDir(), "test.db"), dc.key, migrators.Goose(embedFS()))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -165,7 +165,7 @@ func TestGetDB_CreatesDir(t *testing.T) {
 			t.Parallel()
 
 			path := filepath.Join(t.TempDir(), "sub", "nested", "test.db")
-			db, err := openGetDB(path, dc.key, migrators.Goose[kvQuerier](embedFS()))
+			db, err := openGetDB(path, dc.key, migrators.Goose(embedFS()))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -192,7 +192,7 @@ func TestGetDB_BadPath(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			_, err := openGetDB(filepath.Join(blocker, "test.db"), dc.key, migrators.Goose[kvQuerier](embedFS()))
+			_, err := openGetDB(filepath.Join(blocker, "test.db"), dc.key, migrators.Goose(embedFS()))
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -215,7 +215,7 @@ func TestGetEncryptedDB_WrongKey(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "enc.db")
-	db, err := sqlflow.GetEncryptedDB(path, newQuerier(), goodKey, migrators.Goose[kvQuerier](embedFS()))
+	db, err := sqlflow.GetEncryptedDB(path, newQuerier(), goodKey, migrators.Goose(embedFS()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestGetEncryptedDB_WrongKey(t *testing.T) {
 func TestDB_WriteRead(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose[kvQuerier](embedFS()))
+	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -273,7 +273,7 @@ func TestDB_WriteRead(t *testing.T) {
 func TestDB_WriteOverwrite(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose[kvQuerier](embedFS()))
+	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -302,7 +302,7 @@ func TestDB_WriteOverwrite(t *testing.T) {
 func TestDB_Read_NotFound(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose[kvQuerier](embedFS()))
+	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -318,7 +318,7 @@ func TestDB_Read_NotFound(t *testing.T) {
 func TestDB_ConcurrentReads(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose[kvQuerier](embedFS()))
+	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -349,7 +349,7 @@ func TestDB_ConcurrentReads(t *testing.T) {
 func TestDB_ConcurrentWrites(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose[kvQuerier](embedFS()))
+	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -388,7 +388,7 @@ func TestDB_ConcurrentWrites(t *testing.T) {
 func TestDB_ConcurrentReadWrite(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose[kvQuerier](embedFS()))
+	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -426,7 +426,7 @@ func TestDB_ConcurrentReadWrite(t *testing.T) {
 func TestDB_Write_ContextCancel(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose[kvQuerier](embedFS()))
+	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -451,7 +451,7 @@ func TestDB_Write_ContextCancel(t *testing.T) {
 func TestDB_Write_FuncError(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose[kvQuerier](embedFS()))
+	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -465,7 +465,7 @@ func TestDB_Write_FuncError(t *testing.T) {
 func TestDB_Write_Rollback(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose[kvQuerier](embedFS()))
+	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -504,7 +504,7 @@ func TestDB_Checkpoint(t *testing.T) {
 			db, err := sqlflow.GetDB(
 				filepath.Join(t.TempDir(), "ckpt.db"),
 				newQuerier(),
-				migrators.Goose[kvQuerier](embedFS()),
+				migrators.Goose(embedFS()),
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -540,7 +540,7 @@ func TestDB_Checkpoint(t *testing.T) {
 func TestDB_Close(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose[kvQuerier](embedFS()))
+	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -558,7 +558,7 @@ func TestDB_Close(t *testing.T) {
 func TestDB_Close_Idempotent(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose[kvQuerier](embedFS()))
+	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
 	db.Close() //nolint
 
 	// Second close should not panic.
@@ -577,8 +577,8 @@ func TestDB_OnOpen_Called(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "hooks.db")
 			var gotPath string
 			db, err := openGetDB(path, dc.key,
-				migrators.Goose[kvQuerier](embedFS()),
-				sqlflow.OnOpen[kvQuerier](func(p string, _ *sql.DB) error {
+				migrators.Goose(embedFS()),
+				sqlflow.OnOpen(func(p string, _ *sql.DB) error {
 					gotPath = p
 					return nil
 				}),
@@ -605,7 +605,7 @@ func TestDB_OnOpen_Error(t *testing.T) {
 			sentinel := errors.New("open hook failed")
 			path := filepath.Join(t.TempDir(), "err.db")
 			_, err := openGetDB(path, dc.key,
-				sqlflow.OnOpen[kvQuerier](func(string, *sql.DB) error { return sentinel }),
+				sqlflow.OnOpen(func(string, *sql.DB) error { return sentinel }),
 			)
 			if !errors.Is(err, sentinel) {
 				t.Errorf("got %v, want sentinel error", err)
@@ -619,7 +619,7 @@ func TestTestDB_OnOpen_Called(t *testing.T) {
 
 	var gotPath string
 	db := sqlflow.TestDB(newQuerier(),
-		sqlflow.OnOpen[kvQuerier](func(p string, _ *sql.DB) error {
+		sqlflow.OnOpen(func(p string, _ *sql.DB) error {
 			gotPath = p
 			return nil
 		}),
@@ -641,7 +641,7 @@ func TestTestDB_OnOpen_Error_Panics(t *testing.T) {
 	}()
 
 	sqlflow.TestDB(newQuerier(),
-		sqlflow.OnOpen[kvQuerier](func(string, *sql.DB) error {
+		sqlflow.OnOpen(func(string, *sql.DB) error {
 			return errors.New("hook failure")
 		}),
 	)
@@ -658,8 +658,8 @@ func TestDB_OnClose_Called(t *testing.T) {
 			db, err := openGetDB(
 				filepath.Join(t.TempDir(), "close.db"),
 				dc.key,
-				migrators.Goose[kvQuerier](embedFS()),
-				sqlflow.OnClose[kvQuerier](func() { called = true }),
+				migrators.Goose(embedFS()),
+				sqlflow.OnClose(func() { called = true }),
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -681,8 +681,8 @@ func TestDB_OnClose_CalledOnceOnDoubleClose(t *testing.T) {
 	db, err := openGetDB(
 		filepath.Join(t.TempDir(), "twice.db"),
 		nil,
-		migrators.Goose[kvQuerier](embedFS()),
-		sqlflow.OnClose[kvQuerier](func() { count++ }),
+		migrators.Goose(embedFS()),
+		sqlflow.OnClose(func() { count++ }),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -701,7 +701,7 @@ func TestTestDB_OnClose_Called(t *testing.T) {
 
 	var called bool
 	db := sqlflow.TestDB(newQuerier(),
-		sqlflow.OnClose[kvQuerier](func() { called = true }),
+		sqlflow.OnClose(func() { called = true }),
 	)
 
 	db.Close() //nolint
@@ -721,12 +721,12 @@ func TestDB_OnOpen_OnClose_SharedState(t *testing.T) {
 	db, err := openGetDB(
 		filepath.Join(t.TempDir(), "shared.db"),
 		nil,
-		migrators.Goose[kvQuerier](embedFS()),
-		sqlflow.OnOpen[kvQuerier](func(p string, _ *sql.DB) error {
+		migrators.Goose(embedFS()),
+		sqlflow.OnOpen(func(p string, _ *sql.DB) error {
 			openedPath = p
 			return nil
 		}),
-		sqlflow.OnClose[kvQuerier](func() { closedPath = openedPath }),
+		sqlflow.OnClose(func() { closedPath = openedPath }),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -833,10 +833,10 @@ func TestPool_WithDBFactory_OnOpen_Called(t *testing.T) {
 	var openedPaths []string
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
-		sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
-			return []sqlflow.Option[kvQuerier]{
-				migrators.Goose[kvQuerier](embedFS()),
-				sqlflow.OnOpen[kvQuerier](func(path string, _ *sql.DB) error {
+		sqlflow.WithDBFactory(func() []sqlflow.Option {
+			return []sqlflow.Option{
+				migrators.Goose(embedFS()),
+				sqlflow.OnOpen(func(path string, _ *sql.DB) error {
 					mu.Lock()
 					openedPaths = append(openedPaths, filepath.Base(path))
 					mu.Unlock()
@@ -869,10 +869,10 @@ func TestPool_WithDBFactory_OnClose_OnEvict(t *testing.T) {
 	var closed bool
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
-		sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
-			return []sqlflow.Option[kvQuerier]{
-				migrators.Goose[kvQuerier](embedFS()),
-				sqlflow.OnClose[kvQuerier](func() { closed = true }),
+		sqlflow.WithDBFactory(func() []sqlflow.Option {
+			return []sqlflow.Option{
+				migrators.Goose(embedFS()),
+				sqlflow.OnClose(func() { closed = true }),
 			}
 		}),
 	)
@@ -898,10 +898,10 @@ func TestPool_WithDBFactory_OnClose_OnPoolClose(t *testing.T) {
 	var closed bool
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
-		sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
-			return []sqlflow.Option[kvQuerier]{
-				migrators.Goose[kvQuerier](embedFS()),
-				sqlflow.OnClose[kvQuerier](func() { closed = true }),
+		sqlflow.WithDBFactory(func() []sqlflow.Option {
+			return []sqlflow.Option{
+				migrators.Goose(embedFS()),
+				sqlflow.OnClose(func() { closed = true }),
 			}
 		}),
 	)
@@ -929,19 +929,19 @@ func TestPool_WithDBFactory_FreshStatePerDB(t *testing.T) {
 	states := map[string]*dbState{}
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
-		sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
+		sqlflow.WithDBFactory(func() []sqlflow.Option {
 			// Fresh local var per factory call — one per DB entry.
 			var key string
-			return []sqlflow.Option[kvQuerier]{
-				migrators.Goose[kvQuerier](embedFS()),
-				sqlflow.OnOpen[kvQuerier](func(path string, _ *sql.DB) error {
+			return []sqlflow.Option{
+				migrators.Goose(embedFS()),
+				sqlflow.OnOpen(func(path string, _ *sql.DB) error {
 					key = strings.TrimSuffix(filepath.Base(path), ".db")
 					mu.Lock()
 					states[key] = &dbState{opens: 1}
 					mu.Unlock()
 					return nil
 				}),
-				sqlflow.OnClose[kvQuerier](func() {
+				sqlflow.OnClose(func() {
 					mu.Lock()
 					if s, ok := states[key]; ok {
 						s.closes++
@@ -986,9 +986,9 @@ func TestPool_WithDBFactory_OnOpen_Error(t *testing.T) {
 	sentinel := errors.New("db open hook failed")
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
-		sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
-			return []sqlflow.Option[kvQuerier]{
-				sqlflow.OnOpen[kvQuerier](func(string, *sql.DB) error { return sentinel }),
+		sqlflow.WithDBFactory(func() []sqlflow.Option {
+			return []sqlflow.Option{
+				sqlflow.OnOpen(func(string, *sql.DB) error { return sentinel }),
 			}
 		}),
 	)
@@ -1007,8 +1007,8 @@ func TestPool_WriteRead(t *testing.T) {
 	t.Parallel()
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
-		sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
-			return []sqlflow.Option[kvQuerier]{migrators.Goose[kvQuerier](embedFS())}
+		sqlflow.WithDBFactory(func() []sqlflow.Option {
+			return []sqlflow.Option{migrators.Goose(embedFS())}
 		}),
 	)
 	defer p.Close()
@@ -1042,8 +1042,8 @@ func TestPool_IsolatedKeys(t *testing.T) {
 	t.Parallel()
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
-		sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
-			return []sqlflow.Option[kvQuerier]{migrators.Goose[kvQuerier](embedFS())}
+		sqlflow.WithDBFactory(func() []sqlflow.Option {
+			return []sqlflow.Option{migrators.Goose(embedFS())}
 		}),
 	)
 	defer p.Close()
@@ -1068,8 +1068,8 @@ func TestPool_ConcurrentAccess(t *testing.T) {
 	t.Parallel()
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
-		sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
-			return []sqlflow.Option[kvQuerier]{migrators.Goose[kvQuerier](embedFS())}
+		sqlflow.WithDBFactory(func() []sqlflow.Option {
+			return []sqlflow.Option{migrators.Goose(embedFS())}
 		}),
 	)
 	defer p.Close()
@@ -1102,8 +1102,8 @@ func TestPool_Write_FuncError(t *testing.T) {
 	t.Parallel()
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
-		sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
-			return []sqlflow.Option[kvQuerier]{migrators.Goose[kvQuerier](embedFS())}
+		sqlflow.WithDBFactory(func() []sqlflow.Option {
+			return []sqlflow.Option{migrators.Goose(embedFS())}
 		}),
 	)
 	defer p.Close()
@@ -1120,8 +1120,8 @@ func TestPool_Read_NotFound(t *testing.T) {
 	t.Parallel()
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
-		sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
-			return []sqlflow.Option[kvQuerier]{migrators.Goose[kvQuerier](embedFS())}
+		sqlflow.WithDBFactory(func() []sqlflow.Option {
+			return []sqlflow.Option{migrators.Goose(embedFS())}
 		}),
 	)
 	defer p.Close()
@@ -1162,8 +1162,8 @@ func TestPool_Evict(t *testing.T) {
 	t.Parallel()
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
-		sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
-			return []sqlflow.Option[kvQuerier]{migrators.Goose[kvQuerier](embedFS())}
+		sqlflow.WithDBFactory(func() []sqlflow.Option {
+			return []sqlflow.Option{migrators.Goose(embedFS())}
 		}),
 	)
 	defer p.Close()
@@ -1185,8 +1185,8 @@ func TestPool_Evict_WhileInFlight(t *testing.T) {
 	t.Parallel()
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
-		sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
-			return []sqlflow.Option[kvQuerier]{migrators.Goose[kvQuerier](embedFS())}
+		sqlflow.WithDBFactory(func() []sqlflow.Option {
+			return []sqlflow.Option{migrators.Goose(embedFS())}
 		}),
 	)
 	defer p.Close()
@@ -1213,8 +1213,8 @@ func TestPool_Evict_NonExistent(t *testing.T) {
 	t.Parallel()
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
-		sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
-			return []sqlflow.Option[kvQuerier]{migrators.Goose[kvQuerier](embedFS())}
+		sqlflow.WithDBFactory(func() []sqlflow.Option {
+			return []sqlflow.Option{migrators.Goose(embedFS())}
 		}),
 	)
 	defer p.Close()
@@ -1250,8 +1250,8 @@ func TestPool_ListKeys(t *testing.T) {
 			t.Parallel()
 
 			p := sqlflow.TestPool(t.TempDir(), newQuerier(),
-				sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
-					return []sqlflow.Option[kvQuerier]{migrators.Goose[kvQuerier](embedFS())}
+				sqlflow.WithDBFactory(func() []sqlflow.Option {
+					return []sqlflow.Option{migrators.Goose(embedFS())}
 				}),
 			)
 			defer p.Close()
@@ -1287,8 +1287,8 @@ func TestPool_InactivityReaper(t *testing.T) {
 	t.Parallel()
 
 	p, err := sqlflow.NewPool(t.TempDir(), newQuerier(), 1000, 100*time.Millisecond,
-		sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
-			return []sqlflow.Option[kvQuerier]{migrators.Goose[kvQuerier](embedFS())}
+		sqlflow.WithDBFactory(func() []sqlflow.Option {
+			return []sqlflow.Option{migrators.Goose(embedFS())}
 		}),
 	)
 	if err != nil {
@@ -1313,8 +1313,8 @@ func TestPool_InactivityReaper_ActiveNotEvicted(t *testing.T) {
 	t.Parallel()
 
 	p, err := sqlflow.NewPool(t.TempDir(), newQuerier(), 1000, 200*time.Millisecond,
-		sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
-			return []sqlflow.Option[kvQuerier]{migrators.Goose[kvQuerier](embedFS())}
+		sqlflow.WithDBFactory(func() []sqlflow.Option {
+			return []sqlflow.Option{migrators.Goose(embedFS())}
 		}),
 	)
 	if err != nil {
@@ -1350,8 +1350,8 @@ func TestPool_Close(t *testing.T) {
 	t.Parallel()
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
-		sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
-			return []sqlflow.Option[kvQuerier]{migrators.Goose[kvQuerier](embedFS())}
+		sqlflow.WithDBFactory(func() []sqlflow.Option {
+			return []sqlflow.Option{migrators.Goose(embedFS())}
 		}),
 	)
 	ctx := context.Background()
@@ -1366,8 +1366,8 @@ func TestPool_Close_DrainsInFlight(t *testing.T) {
 	t.Parallel()
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
-		sqlflow.WithDBFactory[kvQuerier](func() []sqlflow.Option[kvQuerier] {
-			return []sqlflow.Option[kvQuerier]{migrators.Goose[kvQuerier](embedFS())}
+		sqlflow.WithDBFactory(func() []sqlflow.Option {
+			return []sqlflow.Option{migrators.Goose(embedFS())}
 		}),
 	)
 	ctx := context.Background()

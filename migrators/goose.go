@@ -19,8 +19,8 @@ import (
 //
 // fsys must contain the *.sql migration files at its root (no subdirectory).
 // Use embed.FS with fs.Sub or os.DirFS to obtain a suitable fs.FS.
-func Goose[Q any](fsys fs.FS) sqlflow.Option[Q] {
-	return sqlflow.OnOpen[Q](func(_ string, db *sql.DB) error {
+func Goose(fsys fs.FS) sqlflow.Option {
+	return sqlflow.OnOpen(func(_ string, db *sql.DB) error {
 		return migrate(db, fsys)
 	})
 }
