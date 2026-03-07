@@ -147,12 +147,6 @@ type Option struct {
 	onClose func()
 }
 
-// PoolOption carries a single pool-level configuration value. Construct one
-// with WithDBFactory.
-type PoolOption struct {
-	dbFactory func() []Option
-}
-
 // OnOpen registers fn to be called with the database file path and the live
 // write connection once all connections are established and the DB is ready for
 // use. If fn returns a non-nil error, the connections are closed and the error
@@ -170,17 +164,6 @@ func OnOpen(fn func(path string, db *sql.DB) error) Option {
 // to release resources tied to this DB's lifetime (e.g. lock files).
 func OnClose(fn func()) Option {
 	return Option{onClose: fn}
-}
-
-// WithDBFactory registers a factory that the Pool calls once for each new
-// database entry to produce a fresh, independent set of DB options. Use a
-// factory (rather than a fixed []Option) so that each opened database gets
-// its own closure state (e.g. its own OS lock-file handle or migrator).
-//
-// The factory must return new closures on every invocation; sharing closure
-// state across factory calls will cause data races.
-func WithDBFactory(factory func() []Option) PoolOption {
-	return PoolOption{dbFactory: factory}
 }
 
 // Close calls the OnClose hook (if any) exactly once, then closes both the
@@ -289,21 +272,20 @@ type Pool[Queries any] struct {
 	// reapCancel stops the background inactivity reaper goroutine.
 	reapCancel context.CancelFunc
 
-	// dbFactory, if non-nil, is called once per new pool entry to produce a
-	// fresh set of DB options (e.g. per-DB migration hooks or OS lock-file
-	// handles). Each call must return new closures with independent state.
-	dbFactory func() []Option
+	// opts is the fixed set of DB options applied to every database opened by
+	// this pool. Callers are responsible for ensuring any shared state in
+	// option closures is safe for concurrent use.
+	opts []Option
 }
 
 // NewPool creates a plain (unencrypted) Pool backed by on-disk SQLite
 // databases. maxCached controls the maximum number of open databases kept in
 // the cache (minimum 1000). inactivityTimeout, if > 0, starts a background
 // reaper that evicts entries idle for longer than the timeout; pass 0 to
-// disable. Pass WithDBFactory(func() []Option{migrators.Goose(fsys)})
-// to apply schema migrations on first open.
+// disable. opts are applied to every database opened by the pool.
 func NewPool[Queries any](
 	dir string, querier Querier[Queries], maxCached int64,
-	inactivityTimeout time.Duration, opts ...PoolOption,
+	inactivityTimeout time.Duration, opts ...Option,
 ) (*Pool[Queries], error) {
 	return newPool(dir, querier, maxCached, nil, inactivityTimeout, opts)
 }
@@ -312,19 +294,18 @@ func NewPool[Queries any](
 // SQLCipher. keyProvider is called with the pool key (e.g. user ID) each time
 // a database is opened; it must return the 32-byte encryption key and true, or
 // false if the key is unavailable (causing Read/Write to return
-// ErrKeyNotAvailable). Migration for encrypted databases is lazy: it runs on
-// first open when the data key is available.
+// ErrKeyNotAvailable). opts are applied to every database opened by the pool.
 func NewEncryptedPool[Queries any](
 	dir string, querier Querier[Queries], maxCached int64,
 	keyProvider func(string) ([]byte, bool),
-	inactivityTimeout time.Duration, opts ...PoolOption,
+	inactivityTimeout time.Duration, opts ...Option,
 ) (*Pool[Queries], error) {
 	return newPool(dir, querier, maxCached, keyProvider, inactivityTimeout, opts)
 }
 
 // TestPool returns a plain pool backed by dir for tests. Panics on error,
 // matching the TestDB convention.
-func TestPool[Queries any](dir string, querier Querier[Queries], opts ...PoolOption) *Pool[Queries] {
+func TestPool[Queries any](dir string, querier Querier[Queries], opts ...Option) *Pool[Queries] {
 	p, err := NewPool(dir, querier, 100_000, 0, opts...)
 	if err != nil {
 		panic(fmt.Sprintf("creating test pool: %v", err))
@@ -460,7 +441,7 @@ func newPool[Queries any](
 	dir string, querier Querier[Queries], maxCached int64,
 	keyProvider func(string) ([]byte, bool),
 	inactivityTimeout time.Duration,
-	opts []PoolOption,
+	opts []Option,
 ) (*Pool[Queries], error) {
 	maxCached = max(maxCached, 1000)
 
@@ -470,20 +451,13 @@ func newPool[Queries any](
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	var dbFactory func() []Option
-	for _, opt := range opts {
-		if opt.dbFactory != nil {
-			dbFactory = opt.dbFactory
-		}
-	}
-
 	p := &Pool[Queries]{
 		dir:               dir,
 		querier:           querier,
 		keyProvider:       keyProvider,
 		inactivityTimeout: inactivityTimeout,
 		reapCancel:        cancel,
-		dbFactory:         dbFactory,
+		opts:              opts,
 	}
 
 	cache, err := newPoolCache[Queries](maxCached)
@@ -622,12 +596,7 @@ func (p *Pool[Queries]) getOrCreate(key string) (*poolEntry[Queries], error) {
 		dbKey = k
 	}
 
-	var dbOpts []Option
-	if p.dbFactory != nil {
-		dbOpts = p.dbFactory()
-	}
-
-	newDB, err := openDB(dbPath, p.querier, dbKey, dbOpts)
+	newDB, err := openDB(dbPath, p.querier, dbKey, p.opts)
 	if err != nil {
 		return nil, fmt.Errorf("opening db for %q: %w", key, err)
 	}

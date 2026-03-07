@@ -334,6 +334,7 @@ import (
 	"time"
 
 	"github.com/avalonbits/sqlflow"
+	"github.com/avalonbits/sqlflow/migrators"
 )
 
 func main() {
@@ -342,10 +343,10 @@ func main() {
 
 	pool, err := sqlflow.NewPool(
 		dir,
-		migrations,
 		newKV,
 		1_000,         // max cached open databases
 		5*time.Minute, // evict after 5 min idle
+		migrators.Goose(migrations),
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -429,6 +430,7 @@ import (
 	"time"
 
 	"github.com/avalonbits/sqlflow"
+	"github.com/avalonbits/sqlflow/migrators"
 )
 
 // go.mod must contain:
@@ -442,11 +444,11 @@ func main() {
 
 	pool, err := sqlflow.NewEncryptedPool(
 		dir,
-		migrations,
 		newKV,
 		1_000,
 		store.Get,     // keyProvider — called per DB open
 		5*time.Minute,
+		migrators.Goose(migrations),
 	)
 	if err != nil {
 		log.Fatal(err)
