@@ -57,6 +57,26 @@ type DBTX interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
+type openFnList []func(path string, db *sql.DB) error
+
+func (olf openFnList) run(path string, db *sql.DB) error {
+	for _, fn := range olf {
+		if err := fn(path, db); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+type closeFnList []func()
+
+func (clf closeFnList) run() {
+	for _, fn := range clf {
+		fn()
+	}
+}
+
 // config holds the per-DB lifecycle callbacks assembled from Option[Q] values.
 // Multiple OnOpen / OnClose options registered on the same DB are chained in
 // registration order.
@@ -64,10 +84,10 @@ type config struct {
 	// onOpenFn is called with the database file path and the live write
 	// connection after all connections are established. A non-nil return aborts
 	// the open and closes the connections.
-	onOpenFn func(path string, db *sql.DB) error
+	onOpenFn openFnList
 
 	// onCloseFn is called exactly once when the DB is closed.
-	onCloseFn func()
+	onCloseFn closeFnList
 }
 
 // Option is a functional option that configures a DB instance.
@@ -94,20 +114,7 @@ type PoolOption func(*poolConfig)
 // For in-memory databases created by TestDB the path is ":memory:".
 func OnOpen(fn func(path string, db *sql.DB) error) Option {
 	return func(c *config) {
-		if c.onOpenFn == nil {
-			c.onOpenFn = fn
-
-			return
-		}
-
-		prev := c.onOpenFn
-		c.onOpenFn = func(path string, db *sql.DB) error {
-			if err := prev(path, db); err != nil {
-				return err
-			}
-
-			return fn(path, db)
-		}
+		c.onOpenFn = append(c.onOpenFn, fn)
 	}
 }
 
@@ -117,17 +124,7 @@ func OnOpen(fn func(path string, db *sql.DB) error) Option {
 // to release resources tied to this DB's lifetime (e.g. lock files).
 func OnClose(fn func()) Option {
 	return func(c *config) {
-		if c.onCloseFn == nil {
-			c.onCloseFn = fn
-
-			return
-		}
-
-		prev := c.onCloseFn
-		c.onCloseFn = func() {
-			prev()
-			fn()
-		}
+		c.onCloseFn = append(c.onCloseFn, fn)
 	}
 }
 
@@ -199,11 +196,9 @@ func TestDB[Queries any](querier Querier[Queries], opts ...Option) *DB[Queries] 
 		opt(&cfg)
 	}
 
-	if cfg.onOpenFn != nil {
-		if err := cfg.onOpenFn(":memory:", conn); err != nil {
-			conn.Close()
-			panic(fmt.Sprintf("onOpen hook: %v", err))
-		}
+	if err := cfg.onOpenFn.run(":memory:", conn); err != nil {
+		conn.Close()
+		panic(fmt.Sprintf("onOpen hook: %v", err))
 	}
 
 	return &DB[Queries]{
@@ -234,11 +229,7 @@ func GetEncryptedDB[Queries any](dbName string, querier Querier[Queries], key []
 // read and write database connections. It waits for any in-flight operations
 // to complete before returning.
 func (db *DB[Queries]) Close() error {
-	db.closeOnce.Do(func() {
-		if db.cfg.onCloseFn != nil {
-			db.cfg.onCloseFn()
-		}
-	})
+	db.closeOnce.Do(db.cfg.onCloseFn.run)
 
 	return errors.Join(db.rddb.Close(), db.wrdb.Close())
 }
@@ -542,13 +533,11 @@ func openDBConns[Queries any](dbName string, querier Querier[Queries], key []byt
 		opt(&cfg)
 	}
 
-	if cfg.onOpenFn != nil {
-		if err := cfg.onOpenFn(dbName, wrdb); err != nil {
-			rddb.Close()
-			wrdb.Close()
+	if err := cfg.onOpenFn.run(dbName, wrdb); err != nil {
+		rddb.Close()
+		wrdb.Close()
 
-			return nil, fmt.Errorf("onOpen hook for %q: %w", dbName, err)
-		}
+		return nil, fmt.Errorf("onOpen hook for %q: %w", dbName, err)
 	}
 
 	return &DB[Queries]{
