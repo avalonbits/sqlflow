@@ -267,10 +267,11 @@ type Pool[Queries any] struct {
 	keyProvider func(userID string) ([]byte, bool)
 
 	// inactivityTimeout is the idle duration after which a pool entry is
-	// evicted by the background reaper. Zero disables the reaper.
+	// evicted by the background reaper. Zero means no reaper is running.
 	inactivityTimeout time.Duration
 
-	// reapCancel stops the background inactivity reaper goroutine.
+	// reapCancel stops the current background inactivity reaper goroutine.
+	// Nil when no reaper is running. Protected by mu.
 	reapCancel context.CancelFunc
 
 	// opts is the fixed set of DB options applied to every database opened by
@@ -281,14 +282,12 @@ type Pool[Queries any] struct {
 
 // NewPool creates a plain (unencrypted) Pool backed by on-disk SQLite
 // databases. maxCached controls the maximum number of open databases kept in
-// the cache (minimum 1000). inactivityTimeout, if > 0, starts a background
-// reaper that evicts entries idle for longer than the timeout; pass 0 to
-// disable. opts are applied to every database opened by the pool.
+// the cache (minimum 1000). opts are applied to every database opened by the
+// pool. Call SetInactivityTimeout to enable the background eviction reaper.
 func NewPool[Queries any](
-	dir string, querier Querier[Queries], maxCached int64,
-	inactivityTimeout time.Duration, opts ...Option,
+	dir string, querier Querier[Queries], maxCached int64, opts ...Option,
 ) (*Pool[Queries], error) {
-	return newPool(dir, querier, maxCached, nil, inactivityTimeout, opts)
+	return newPool(dir, querier, maxCached, nil, opts)
 }
 
 // NewEncryptedPool creates a Pool where each database is encrypted with
@@ -296,18 +295,18 @@ func NewPool[Queries any](
 // a database is opened; it must return the 32-byte encryption key and true, or
 // false if the key is unavailable (causing Read/Write to return
 // ErrKeyNotAvailable). opts are applied to every database opened by the pool.
+// Call SetInactivityTimeout to enable the background eviction reaper.
 func NewEncryptedPool[Queries any](
 	dir string, querier Querier[Queries], maxCached int64,
-	keyProvider func(string) ([]byte, bool),
-	inactivityTimeout time.Duration, opts ...Option,
+	keyProvider func(string) ([]byte, bool), opts ...Option,
 ) (*Pool[Queries], error) {
-	return newPool(dir, querier, maxCached, keyProvider, inactivityTimeout, opts)
+	return newPool(dir, querier, maxCached, keyProvider, opts)
 }
 
 // TestPool returns a plain pool backed by dir for tests. Panics on error,
 // matching the TestDB convention.
 func TestPool[Queries any](dir string, querier Querier[Queries], opts ...Option) *Pool[Queries] {
-	p, err := NewPool(dir, querier, 100_000, 0, opts...)
+	p, err := NewPool(dir, querier, 100_000, opts...)
 	if err != nil {
 		panic(fmt.Sprintf("creating test pool: %v", err))
 	}
@@ -370,11 +369,34 @@ func (p *Pool[Queries]) ListKeys() ([]string, error) {
 	return keys, nil
 }
 
+// SetInactivityTimeout starts a background reaper that evicts pool entries
+// that have been idle for longer than d. Calling it again cancels the previous
+// reaper and starts a new one with the updated duration. Pass 0 to stop the
+// reaper without starting a new one.
+func (p *Pool[Queries]) SetInactivityTimeout(d time.Duration) {
+	p.mu.Lock()
+	if p.reapCancel != nil {
+		p.reapCancel()
+		p.reapCancel = nil
+	}
+	p.inactivityTimeout = d
+	if d > 0 {
+		ctx, cancel := context.WithCancel(context.Background())
+		p.reapCancel = cancel
+		go p.runInactivityReaper(ctx)
+	}
+	p.mu.Unlock()
+}
+
 // Close stops the inactivity reaper and closes all cached databases.
 // sql.DB.Close waits for in-flight operations to finish, so this blocks until
 // everything drains.
 func (p *Pool[Queries]) Close() error {
-	p.reapCancel()
+	p.mu.Lock()
+	if p.reapCancel != nil {
+		p.reapCancel()
+	}
+	p.mu.Unlock()
 
 	var errs []error
 
@@ -441,7 +463,6 @@ func openDB[Queries any](dbName string, querier Querier[Queries], key []byte, op
 func newPool[Queries any](
 	dir string, querier Querier[Queries], maxCached int64,
 	keyProvider func(string) ([]byte, bool),
-	inactivityTimeout time.Duration,
 	opts []Option,
 ) (*Pool[Queries], error) {
 	maxCached = max(maxCached, 1000)
@@ -450,28 +471,18 @@ func newPool[Queries any](
 		return nil, fmt.Errorf("creating pool dir: %w", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-
 	p := &Pool[Queries]{
-		dir:               dir,
-		querier:           querier,
-		keyProvider:       keyProvider,
-		inactivityTimeout: inactivityTimeout,
-		reapCancel:        cancel,
-		opts:              opts,
+		dir:         dir,
+		querier:     querier,
+		keyProvider: keyProvider,
+		opts:        opts,
 	}
 
 	cache, err := newPoolCache[Queries](maxCached)
 	if err != nil {
-		cancel()
-
 		return nil, fmt.Errorf("creating pool cache: %w", err)
 	}
 	p.cache = cache
-
-	if inactivityTimeout > 0 {
-		go p.runInactivityReaper(ctx)
-	}
 
 	return p, nil
 }

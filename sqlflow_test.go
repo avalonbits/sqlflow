@@ -794,7 +794,7 @@ func TestNewPool_CreatesDir(t *testing.T) {
 	t.Parallel()
 
 	dir := filepath.Join(t.TempDir(), "sub", "pool")
-	p, err := sqlflow.NewPool(dir, newQuerier(), 1000, 0, gooseOpt())
+	p, err := sqlflow.NewPool(dir, newQuerier(), 1000, gooseOpt())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -814,7 +814,7 @@ func TestNewPool_BadDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := sqlflow.NewPool(filepath.Join(blocker, "pool"), newQuerier(), 1000, 0, gooseOpt())
+	_, err := sqlflow.NewPool(filepath.Join(blocker, "pool"), newQuerier(), 1000, gooseOpt())
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -1050,7 +1050,6 @@ func TestPool_KeyNotAvailable(t *testing.T) {
 	p, err := sqlflow.NewEncryptedPool(
 		t.TempDir(), newQuerier(), 1000,
 		func(string) ([]byte, bool) { return nil, false },
-		0,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1186,13 +1185,13 @@ func TestPool_ListKeys(t *testing.T) {
 func TestPool_InactivityReaper(t *testing.T) {
 	t.Parallel()
 
-	p, err := sqlflow.NewPool(t.TempDir(), newQuerier(), 1000, 100*time.Millisecond,
-		gooseOpt(),
-	)
+	p, err := sqlflow.NewPool(t.TempDir(), newQuerier(), 1000, gooseOpt())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer p.Close()
+
+	p.SetInactivityTimeout(100 * time.Millisecond)
 
 	ctx := context.Background()
 	if err := p.Write(ctx, "x", func(q *kvQuerier) error { return q.Set(ctx, "k", "v") }); err != nil {
@@ -1210,13 +1209,13 @@ func TestPool_InactivityReaper(t *testing.T) {
 func TestPool_InactivityReaper_ActiveNotEvicted(t *testing.T) {
 	t.Parallel()
 
-	p, err := sqlflow.NewPool(t.TempDir(), newQuerier(), 1000, 200*time.Millisecond,
-		gooseOpt(),
-	)
+	p, err := sqlflow.NewPool(t.TempDir(), newQuerier(), 1000, gooseOpt())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer p.Close()
+
+	p.SetInactivityTimeout(200 * time.Millisecond)
 
 	ctx := context.Background()
 	// Keep the entry active by writing every 50ms for 400ms.

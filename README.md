@@ -130,8 +130,8 @@ runs at a time — but concurrent Reads are always allowed, even while a Write i
 ## Pool usage
 
 When each user (or tenant) needs their own isolated database file, use `NewPool` instead of `OpenDB`.
-The pool opens databases lazily on first access, keeps them in a [Ristretto](https://github.com/dgraph-io/ristretto) cache, and closes them after
-a configurable idle timeout.
+The pool opens databases lazily on first access and keeps them in a [Ristretto](https://github.com/dgraph-io/ristretto) cache.
+Call `SetInactivityTimeout` to start a background reaper that evicts databases idle longer than the given duration.
 
 Options work exactly the same way as with `OpenDB` — pass them as the trailing variadic arguments.
 The options are applied to every database the pool opens, so `migrators.Goose(fsys)` will run
@@ -142,12 +142,12 @@ pool, err := sqlflow.NewPool(
     dir,     // directory where per-user .db files are stored
     newKV,   // same Querier factory as OpenDB
     1_000,   // max cached open databases
-    5*time.Minute, // evict after 5 min idle (0 to disable)
     migrators.Goose(migrations), // options — same as OpenDB
 )
 if err != nil {
     log.Fatal(err)
 }
+pool.SetInactivityTimeout(5 * time.Minute) // evict after 5 min idle
 defer pool.Close()
 
 ctx := context.Background()
@@ -279,7 +279,8 @@ migrations, then opens separate read and write connections in WAL mode.
 
 `Pool` manages a collection of SQLite databases — one per key (e.g. one per
 user). Databases are opened lazily and kept in a [Ristretto](https://github.com/dgraph-io/ristretto) cache; evicted
-databases are closed only after all in-flight operations finish.
+databases are closed only after all in-flight operations finish. Call
+`SetInactivityTimeout` to enable background eviction of idle databases.
 
 Use `NewEncryptedPool` to enable per-key encryption; it requires a `keyProvider`
 function. If the key for a given user is unavailable, `Read`/`Write` return
@@ -484,13 +485,13 @@ func main() {
 	pool, err := sqlflow.NewPool(
 		dir,
 		newKV,
-		1_000,         // max cached open databases
-		5*time.Minute, // evict after 5 min idle
+		1_000, // max cached open databases
 		migrators.Goose(migrations),
 	)
 	if err != nil {
 		log.Fatal(err)
 	}
+	pool.SetInactivityTimeout(5 * time.Minute)
 	defer pool.Close()
 
 	ctx := context.Background()
@@ -586,13 +587,13 @@ func main() {
 		dir,
 		newKV,
 		1_000,
-		store.Get,     // keyProvider — called per DB open
-		5*time.Minute,
+		store.Get, // keyProvider — called per DB open
 		migrators.Goose(migrations),
 	)
 	if err != nil {
 		log.Fatal(err)
 	}
+	pool.SetInactivityTimeout(5 * time.Minute)
 	defer pool.Close()
 
 	ctx := context.Background()
