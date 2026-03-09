@@ -272,8 +272,9 @@ DROP TABLE ...`)},
 
 ### Single database — `DB[Q]`
 
-`OpenDB` creates the file and any parent directories, runs all pending goose
-migrations, then opens separate read and write connections in WAL mode.
+`OpenDB` creates the file and any parent directories, then opens separate read
+and write connections in WAL mode. Pass `migrators.Goose(fsys)` to run
+migrations on open.
 
 ### Per-key connection pool — `Pool[Q]`
 
