@@ -31,7 +31,7 @@ func dirFS() fs.FS {
 // testQuerier wraps a DBTX to allow raw SQL execution inside sqlflow transactions.
 type testQuerier struct{ db sqlflow.DBTX }
 
-func newTestQuerier() sqlflow.Querier[testQuerier] {
+func newTestQuerier() sqlflow.Querier[testQuerier, sqlflow.DBTX] {
 	return func(tx sqlflow.DBTX) *testQuerier { return &testQuerier{db: tx} }
 }
 
