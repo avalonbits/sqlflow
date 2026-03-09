@@ -1,13 +1,13 @@
 # sqlflow
 
-A SQLite-backed storage layer for Go. It wraps SQLite in WAL mode
-with separate read/write connections, serialised writes with exponential-backoff
+A SQLite-backed storage layer for Go. It wraps SQLite in WAL mode using the [mattn/go-sqlite3](https://github.com/mattn/go-sqlite3)
+driver, with separate read/write connections, serialised writes with exponential-backoff
 retries, and an optional per-key connection pool backed by a Ristretto cache.
 
 At-rest encryption is supported via SQLCipher.
 
-All database access goes through `Read` and `Write` — the core abstraction.
-They manage transactions automatically so you never touch a raw connection directly.
+All database access goes through `Read` and `Write` methods, which manage the transaction
+for you, so you never touch a raw connection directly.
 
 This package works nicely with [sqlc.dev](https://sqlc.dev), which creates named
 queries as methods to a type that wrap database/sql.{DB,Tx} connections.
@@ -115,6 +115,17 @@ func (s *kvStore) Get(ctx context.Context, key string) (string, error) {
 	return val, err
 }
 ```
+
+In the typical case where you are working with a single database file, calling `sqlflow.OpenDB` with the
+path and Querier factory is analogous to `sql.Open(...)` with an extra factory function.
+
+From then on you call `db.Read(ctx, func(q *kvStore) error { ... })` with your database code inside
+the querier closure for concurrent read operations or use Write when you want to perform write operations.
+
+While there is nothing preventing you from doing write operations within the Read closure, you should
+avoid it: the read connection uses deferred transactions, so a write inside a Read closure can conflict
+with an active Write and return SQLITE_BUSY. All Write calls are serialized with each other — only one
+runs at a time — but concurrent Reads are always allowed, even while a Write is in progress.
 
 ## Encryption
 
