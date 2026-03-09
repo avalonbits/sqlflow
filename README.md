@@ -2,29 +2,15 @@
 
 A SQLite-backed storage layer for Go. It wraps SQLite in WAL mode
 with separate read/write connections, serialised writes with exponential-backoff
-retries, and an optional per-key connection pool backed by a TinyLFU cache.
+retries, and an optional per-key connection pool backed by a Ristretto cache.
+
 At-rest encryption is supported via SQLCipher.
 
 All database access goes through `Read` and `Write` — the core abstraction.
 They manage transactions automatically so you never touch a raw connection directly.
 
-## Table of Contents
-
-- [Installation](#installation)
-- [Encryption](#encryption)
-- [Concepts](#concepts)
-  - [Read and Write](#read-and-write)
-  - [Querier](#querier)
-  - [Migrations](#migrations)
-  - [Single database — DB\[Q\]](#single-database--dbq)
-  - [Per-key connection pool — Pool\[Q\]](#per-key-connection-pool--poolq)
-  - [Testing](#testing)
-- [Examples](#examples)
-  - [1. Single database — plain](#1-single-database--plain)
-  - [2. Single database — encrypted](#2-single-database--encrypted)
-  - [3. Connection pool — plain](#3-connection-pool--plain)
-  - [4. Connection pool — encrypted](#4-connection-pool--encrypted)
-- [License](#license)
+This package works nicely with [sqlc.dev](https://sqlc.dev), which creates named
+queries as methods to a type that wrap database/sql.{DB,Tx} connections.
 
 ## Installation
 
@@ -32,8 +18,87 @@ They manage transactions automatically so you never touch a raw connection direc
 go get github.com/avalonbits/sqlflow
 ```
 
-Because sqlflow uses cgo (via go-sqlite3), you need a C compiler available at
-build time.
+## Usage
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"testing/fstest"
+
+	"github.com/avalonbits/sqlflow"
+	"github.com/avalonbits/sqlflow/migrators"
+)
+
+func main() {
+	path := "/tmp/plain.db"
+	os.Remove(path)
+
+	db, err := sqlflow.OpenDB(path, newKV, migrators.Goose(migrations))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+
+	// Write starts an immediate (exclusive) transaction and runs your func
+	// inside it. Blocks if another write is in progress.
+	if err := db.Write(ctx, func(s *kvStore) error {
+		return s.Set(ctx, "hello", "world")
+	}); err != nil {
+		log.Fatal(err)
+	}
+
+	var val string
+
+	// Read starts a deferred transaction and can run concurrently with other
+	// Read calls (but not with a Write).
+	if err := db.Read(ctx, func(s *kvStore) error {
+		var err error
+		val, err = s.Get(ctx, "hello")
+		return err
+	}); err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println(val) // world
+}
+
+// migrations is an in-memory goose migration set. In production use
+// //go:embed with fs.Sub, or os.DirFS, to point at real .sql files.
+var migrations = fstest.MapFS{
+	"001_init.sql": {Data: []byte(`-- +goose Up
+CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, val TEXT NOT NULL);
+-- +goose Down
+DROP TABLE kv;`)},
+}
+
+// kvStore wraps a DBTX to provide typed query methods for the kv table.
+type kvStore struct{ db sqlflow.DBTX }
+
+// newKV is a sqlflow.Querier: sqlflow calls it with the transaction's
+// connection so every method on kvStore automatically runs within that
+// transaction — no connection is ever passed around manually.
+func newKV(db sqlflow.DBTX) *kvStore { return &kvStore{db: db} }
+
+func (s *kvStore) Set(ctx context.Context, key, val string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO kv(key,val) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET val=excluded.val`,
+		key, val)
+	return err
+}
+
+func (s *kvStore) Get(ctx context.Context, key string) (string, error) {
+	var val string
+	err := s.db.QueryRowContext(ctx, `SELECT val FROM kv WHERE key=?`, key).Scan(&val)
+	return val, err
+}
+```
 
 ## Encryption
 
@@ -108,10 +173,10 @@ var querier sqlflow.Querier[Queries] = New
 
 ### Migrations
 
-sqlflow uses [goose](https://github.com/pressly/goose) for migrations. Every
-open function (`OpenDB`, `NewPool`, …) runs all pending migrations automatically
-before returning. Migrations are supplied as an `fs.FS` whose root contains the
-`*.sql` files directly — no subdirectory.
+sqlflow uses [goose](https://github.com/pressly/goose) for migrations via the
+`migrators` sub-package. Pass `migrators.Goose(fsys)` as an option to any
+constructor (`OpenDB`, `NewPool`, …) to run all pending migrations on open.
+The `fs.FS` root must contain the `*.sql` files directly — no subdirectory.
 
 ```go
 // Embedded at compile time — sub-root so the FS root IS the migrations dir.
@@ -153,8 +218,8 @@ function. If the key for a given user is unavailable, `Read`/`Write` return
 error, keeping test setup concise:
 
 ```go
-db   := sqlflow.TestDB(fsys, querier)
-pool := sqlflow.TestPool(t.TempDir(), fsys, querier)
+db   := sqlflow.TestDB(querier, migrators.Goose(fsys))
+pool := sqlflow.TestPool(t.TempDir(), querier, migrators.Goose(fsys))
 ```
 
 ## Examples
@@ -172,13 +237,14 @@ import (
 	"testing/fstest"
 
 	"github.com/avalonbits/sqlflow"
+	"github.com/avalonbits/sqlflow/migrators"
 )
 
 func main() {
 	path := "/tmp/plain.db"
 	os.Remove(path)
 
-	db, err := sqlflow.OpenDB(path, migrations, newKV)
+	db, err := sqlflow.OpenDB(path, newKV, migrators.Goose(migrations))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -249,6 +315,7 @@ import (
 	"testing/fstest"
 
 	"github.com/avalonbits/sqlflow"
+	"github.com/avalonbits/sqlflow/migrators"
 )
 
 // go.mod must contain:
@@ -263,7 +330,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	db, err := sqlflow.OpenEncryptedDB(path, migrations, newKV, key)
+	db, err := sqlflow.OpenEncryptedDB(path, newKV, key, migrators.Goose(migrations))
 	if err != nil {
 		log.Fatal(err)
 	}
