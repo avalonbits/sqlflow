@@ -50,7 +50,7 @@ func (q *kvQuerier) Get(ctx context.Context, key string) (string, error) {
 	return val, err
 }
 
-func newQuerier() sqlflow.Querier[kvQuerier] {
+func newQuerier() sqlflow.Querier[kvQuerier, sqlflow.DBTX] {
 	return func(tx sqlflow.DBTX) *kvQuerier {
 		return &kvQuerier{db: tx}
 	}
@@ -79,7 +79,7 @@ func dbCases() []dbCase {
 }
 
 // openGetDB calls OpenDB or OpenEncryptedDB based on whether key is nil.
-func openDB(path string, key []byte, opts ...sqlflow.Option) (*sqlflow.DB[kvQuerier], error) {
+func openDB(path string, key []byte, opts ...sqlflow.Option) (*sqlflow.DB[kvQuerier, sqlflow.DBTX], error) {
 	if len(key) > 0 {
 		return sqlflow.OpenEncryptedDB(path, newQuerier(), key, opts...)
 	}
