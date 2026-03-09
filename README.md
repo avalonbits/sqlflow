@@ -119,6 +119,10 @@ func (s *kvStore) Get(ctx context.Context, key string) (string, error) {
 In the typical case where you are working with a single database file, calling `sqlflow.OpenDB` with the
 path and Querier factory is analogous to `sql.Open(...)` with an extra factory function.
 
+`sqlflow.DB` is generic over your Querier type — `DB[kvStore]` in this example — which is why the
+closure passed to `Read` and `Write` receives a concrete `*kvStore` rather than an interface. The
+type is fixed at construction time via the factory function, so no type assertions are needed.
+
 From then on you call `db.Read(ctx, func(q *kvStore) error { ... })` with your database code inside
 the querier closure for concurrent read operations or use Write when you want to perform write operations.
 
@@ -131,7 +135,7 @@ runs at a time — but concurrent Reads are always allowed, even while a Write i
 
 When each user (or tenant) needs their own isolated database file, use `NewPool` instead of `OpenDB`.
 The pool opens databases lazily on first access and keeps them in a [Ristretto](https://github.com/dgraph-io/ristretto) cache.
-Call `SetInactivityTimeout` to start a background reaper that evicts databases idle longer than the given duration.
+Call `SetInactivityTimeout` to start a background reaper that evicts databases that idle longer than the given duration.
 
 Options work exactly the same way as with `OpenDB` — pass them as the trailing variadic arguments.
 The options are applied to every database the pool opens, so `migrators.Goose(fsys)` will run
