@@ -127,6 +127,53 @@ avoid it: the read connection uses deferred transactions, so a write inside a Re
 with an active Write and return SQLITE_BUSY. All Write calls are serialized with each other — only one
 runs at a time — but concurrent Reads are always allowed, even while a Write is in progress.
 
+## Pool usage
+
+When each user (or tenant) needs their own isolated database file, use `NewPool` instead of `OpenDB`.
+The pool opens databases lazily on first access, keeps them in a TinyLFU cache, and closes them after
+a configurable idle timeout.
+
+Options work exactly the same way as with `OpenDB` — pass them as the trailing variadic arguments.
+The options are applied to every database the pool opens, so `migrators.Goose(fsys)` will run
+migrations on each user's database the first time it is accessed.
+
+```go
+pool, err := sqlflow.NewPool(
+    dir,     // directory where per-user .db files are stored
+    newKV,   // same Querier factory as OpenDB
+    1_000,   // max cached open databases
+    5*time.Minute, // evict after 5 min idle (0 to disable)
+    migrators.Goose(migrations), // options — same as OpenDB
+)
+if err != nil {
+    log.Fatal(err)
+}
+defer pool.Close()
+
+ctx := context.Background()
+
+// Read and Write take an extra key argument that selects the database.
+if err := pool.Write(ctx, "alice", func(s *kvStore) error {
+    return s.Set(ctx, "hello", "world")
+}); err != nil {
+    log.Fatal(err)
+}
+
+var val string
+if err := pool.Read(ctx, "alice", func(s *kvStore) error {
+    var err error
+    val, err = s.Get(ctx, "hello")
+    return err
+}); err != nil {
+    log.Fatal(err)
+}
+
+fmt.Println(val) // world
+```
+
+The only difference from the single-database case is the `key` argument (`"alice"` above). Everything
+else — the Querier type, the closure shape, the Read/Write semantics — is identical.
+
 ## Encryption
 
 sqlflow supports at-rest encryption through [SQLCipher](https://www.zetetic.net/sqlcipher/),
