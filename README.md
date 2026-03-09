@@ -2,7 +2,7 @@
 
 A SQLite-backed storage layer for Go. It wraps SQLite in WAL mode using the [mattn/go-sqlite3](https://github.com/mattn/go-sqlite3)
 driver, with separate read/write connections, serialised writes with exponential-backoff
-retries, and an optional per-key connection pool backed by a Ristretto cache.
+retries, and an optional per-key connection pool backed by a [Ristretto](https://github.com/dgraph-io/ristretto) cache.
 
 At-rest encryption is supported via SQLCipher.
 
@@ -130,7 +130,7 @@ runs at a time — but concurrent Reads are always allowed, even while a Write i
 ## Pool usage
 
 When each user (or tenant) needs their own isolated database file, use `NewPool` instead of `OpenDB`.
-The pool opens databases lazily on first access, keeps them in a TinyLFU cache, and closes them after
+The pool opens databases lazily on first access, keeps them in a [Ristretto](https://github.com/dgraph-io/ristretto) cache, and closes them after
 a configurable idle timeout.
 
 Options work exactly the same way as with `OpenDB` — pass them as the trailing variadic arguments.
@@ -278,7 +278,7 @@ migrations, then opens separate read and write connections in WAL mode.
 ### Per-key connection pool — `Pool[Q]`
 
 `Pool` manages a collection of SQLite databases — one per key (e.g. one per
-user). Databases are opened lazily and kept in a TinyLFU cache; evicted
+user). Databases are opened lazily and kept in a [Ristretto](https://github.com/dgraph-io/ristretto) cache; evicted
 databases are closed only after all in-flight operations finish.
 
 Use `NewEncryptedPool` to enable per-key encryption; it requires a `keyProvider`
