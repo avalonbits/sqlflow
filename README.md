@@ -219,14 +219,15 @@ accessor — already bound to an open transaction. You call your query methods
 on it; sqlflow commits on success or rolls back on any error, automatically,
 with no extra code on your part.
 
-If your `Q` type has an exported field holding the underlying `DBTX`, it is
-technically possible to copy that value out of the closure and use it after
-`Read` or `Write` returns. You should not do this. The `DBTX` is bound to a
-transaction that sqlflow has already committed or rolled back by the time the
-closure exits; any query run against it afterwards will execute outside a
-transaction and with undefined behaviour — it may silently run against a stale
-connection, see an inconsistent snapshot, or fail with a driver error. Keep
-all database access inside the closure.
+> [!CAUTION]
+> If your `Q` type has an exported field holding the underlying `DBTX`, it is
+> technically possible to copy that value out of the closure and use it after
+> `Read` or `Write` returns. You should not do this. The `DBTX` is bound to a
+> transaction that sqlflow has already committed or rolled back by the time the
+> closure exits; any query run against it afterwards will execute outside a
+> transaction and with undefined behaviour — it may silently run against a stale
+> connection, see an inconsistent snapshot, or fail with a driver error. Keep
+> all database access inside the closure.
 
 **Read** opens a deferred (read-only) transaction on a shared connection pool,
 so multiple goroutines may call it concurrently without blocking each other.
