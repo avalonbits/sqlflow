@@ -260,10 +260,15 @@ var querier sqlflow.Querier[Queries] = New
 
 ### Migrations
 
-sqlflow uses [goose](https://github.com/pressly/goose) for migrations via the
-`migrators` sub-package. Pass `migrators.Goose(fsys)` as an option to any
-constructor (`OpenDB`, `NewPool`, …) to run all pending migrations on open.
-The `fs.FS` root must contain the `*.sql` files directly — no subdirectory.
+sqlflow has no built-in migration tool. Instead, migrations are applied through
+the `OnOpen` hook: any option that runs schema changes against the live write
+connection before the database is returned to the caller qualifies as a
+migrator.
+
+The `migrators` sub-package ships a ready-made [goose](https://github.com/pressly/goose)
+integration. Pass `migrators.Goose(fsys)` as an option to any constructor
+(`OpenDB`, `NewPool`, …) to run all pending goose migrations on open. The
+`fs.FS` root must contain the `*.sql` files directly — no subdirectory.
 
 ```go
 // Embedded at compile time — sub-root so the FS root IS the migrations dir.
@@ -282,6 +287,15 @@ CREATE TABLE ...
 -- +goose Down
 DROP TABLE ...`)},
 }
+```
+
+To use a different migration tool, wrap it in `sqlflow.OnOpen`:
+
+```go
+sqlflow.OnOpen(func(path string, db *sql.DB) error {
+    // run your migrations against db
+    return myMigrator.Migrate(db)
+})
 ```
 
 ### Single database — `DB[Q]`
