@@ -38,7 +38,15 @@ func main() {
 	path := "/tmp/plain.db"
 	os.Remove(path)
 
-	db, err := sqlflow.OpenDB(path, newKV, migrators.Goose(migrations))
+	db, err := sqlflow.OpenDB(
+        // the path to your database file.
+        path,
+        // A factory function wraps sqlflow.DBTX types.
+        newKV,
+        // A variadic list of options (see section on Options).
+        // - migrators.Goose will apply migrations to the database using goose.
+        migrators.Goose(migrations),
+    )
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -48,9 +56,10 @@ func main() {
 
 	// Write starts an immediate (exclusive) transaction and runs your func
 	// inside it. Blocks if another write is in progress.
-	if err := db.Write(ctx, func(s *kvStore) error {
+	err = db.Write(ctx, func(s *kvStore) error {
 		return s.Set(ctx, "hello", "world")
-	}); err != nil {
+	})
+    if err != nil {
 		log.Fatal(err)
 	}
 
@@ -58,11 +67,13 @@ func main() {
 
 	// Read starts a deferred transaction and can run concurrently with other
 	// Read calls (but not with a Write).
-	if err := db.Read(ctx, func(s *kvStore) error {
+	err = db.Read(ctx, func(s *kvStore) error {
 		var err error
 		val, err = s.Get(ctx, "hello")
 		return err
-	}); err != nil {
+	})
+
+    if err != nil {
 		log.Fatal(err)
 	}
 
@@ -72,10 +83,15 @@ func main() {
 // migrations is an in-memory goose migration set. In production use
 // //go:embed with fs.Sub, or os.DirFS, to point at real .sql files.
 var migrations = fstest.MapFS{
-	"001_init.sql": {Data: []byte(`-- +goose Up
-CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, val TEXT NOT NULL);
--- +goose Down
-DROP TABLE kv;`)},
+	"001_init.sql": {
+        Data: []byte(`
+            -- +goose Up
+            CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, val TEXT NOT NULL);
+
+            -- +goose Down
+            DROP TABLE kv;
+        `),
+    },
 }
 
 // kvStore wraps a DBTX to provide typed query methods for the kv table.
