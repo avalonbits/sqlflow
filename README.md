@@ -129,9 +129,8 @@ To enable it, replace the standard `go-sqlite3` driver with the
 replace github.com/mattn/go-sqlite3 => github.com/jgiannuzzi/go-sqlite3 v1.14.35-0.20260227142656-2c447b9a2806
 ```
 
-Then use `OpenDB` / `OpenEncryptedDB` (single database) or pass a
-`keyProvider` to `NewEncryptedPool` (per-key pool). Both accept a 32-byte key; sqlflow
-passes it to the driver via DSN parameters at open time.
+Then use `OpenEncryptedDB` (single database) or pass a `keyProvider` to `NewEncryptedPool`
+(per-key pool). Both accept a 32-byte key; sqlflow passes it to the driver via DSN parameters at open time.
 
 ## Concepts
 
