@@ -730,7 +730,13 @@ func (db *DB[Queries, D]) transaction(ctx context.Context, rdbms *sql.DB, f func
 		return fmt.Errorf("error creating transaction: %w", err)
 	}
 
-	if err := f(db.querier(any(tx).(D))); err != nil {
+	// Go's type system does not allow assigning a concrete value (*sql.Tx) to a
+	// type parameter (D) directly, even when the concrete type satisfies the
+	// constraint. Boxing through any and asserting back to D is the standard
+	// generics workaround for this limitation.
+	querier := db.querier(any(tx).(D))
+
+	if err := f(querier); err != nil {
 		if rbErr := tx.Rollback(); rbErr != nil {
 			return errors.Join(err, rbErr)
 		}
