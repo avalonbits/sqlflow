@@ -17,10 +17,11 @@ package modernc
 
 import (
 	"github.com/avalonbits/sqlflow"
+	"github.com/avalonbits/sqlflow/drivers"
 
 	_ "modernc.org/sqlite"
 )
 
 // Driver is the sqlflow option that registers and selects the modernc.org/sqlite
 // SQLite driver. Pass it to any sqlflow constructor.
-var Driver = sqlflow.WithDriver(sqlflow.ModerncDriver)
+var Driver = sqlflow.WithDriver(drivers.Modernc)

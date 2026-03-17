@@ -23,6 +23,7 @@ package ncruces
 
 import (
 	"github.com/avalonbits/sqlflow"
+	"github.com/avalonbits/sqlflow/drivers"
 
 	_ "github.com/ncruces/go-sqlite3/driver"
 	_ "github.com/ncruces/go-sqlite3/embed"
@@ -30,4 +31,4 @@ import (
 
 // Driver is the sqlflow option that registers and selects the
 // ncruces/go-sqlite3 SQLite driver. Pass it to any sqlflow constructor.
-var Driver = sqlflow.WithDriver(sqlflow.NcrucesDriver)
+var Driver = sqlflow.WithDriver(drivers.Ncruces)

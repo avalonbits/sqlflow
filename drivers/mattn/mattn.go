@@ -19,10 +19,11 @@ package mattn
 
 import (
 	"github.com/avalonbits/sqlflow"
+	"github.com/avalonbits/sqlflow/drivers"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
 // Driver is the sqlflow option that registers and selects the
 // mattn/go-sqlite3 SQLite driver. Pass it to any sqlflow constructor.
-var Driver = sqlflow.WithDriver(sqlflow.MattnDriver)
+var Driver = sqlflow.WithDriver(drivers.Mattn)

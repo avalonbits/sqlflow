@@ -18,17 +18,17 @@
 //
 // Both types have encrypted variants: use OpenEncryptedDB and NewEncryptedPool
 // instead of their plain counterparts. Encryption requires the jgiannuzzi fork
-// of mattn/go-sqlite3 with SQLCipher support and WithDriver(MattnDriver).
+// of mattn/go-sqlite3 with SQLCipher support and the mattn driver sub-package.
 //
-// sqlflow has no built-in driver dependency. Import the SQLite driver of your
-// choice and pass the corresponding DriverConfig via WithDriver:
+// sqlflow has no built-in driver dependency. Import one of the driver
+// sub-packages to register a SQLite driver and receive a ready-to-use Option:
 //
-//	import _ "github.com/mattn/go-sqlite3"              // mattn (default, CGo)
-//	import _ "modernc.org/sqlite"                        // modernc (pure Go)
-//	import _ "github.com/ncruces/go-sqlite3/driver"      // ncruces (WebAssembly)
-//	import _ "github.com/ncruces/go-sqlite3/embed"
+//	import "github.com/avalonbits/sqlflow/drivers/mattn"   // mattn (CGo, encryption)
+//	import "github.com/avalonbits/sqlflow/drivers/modernc" // modernc (pure Go)
+//	import "github.com/avalonbits/sqlflow/drivers/ncruces" // ncruces (WebAssembly)
 //
-// If no WithDriver option is passed, sqlflow defaults to MattnDriver.
+// If no driver option is passed, sqlflow defaults to drivers.Mattn (requires a
+// separate blank-import of github.com/mattn/go-sqlite3).
 //
 // Migrations are decoupled from the core: pass migrators.Goose(fsys) as an
 // Option to run goose-based schema migrations on open, or implement your own
@@ -38,7 +38,6 @@ package sqlflow
 import (
 	"context"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
@@ -52,6 +51,8 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/dgraph-io/ristretto/v2"
+
+	"github.com/avalonbits/sqlflow/drivers"
 )
 
 // testDBCounter generates unique in-memory database names for TestDB to ensure
@@ -119,7 +120,7 @@ type DB[Queries any, D DBTX] struct {
 
 	// driver is the active SQLite driver configuration, used to detect
 	// permanent connection errors.
-	driver DriverConfig
+	driver drivers.Config
 }
 
 // TestDB creates an in-memory SQLite database and returns a DB ready for use
@@ -132,7 +133,7 @@ func TestDB[Queries any, D DBTX](querier Querier[Queries, D], opts ...Option) *D
 	pragmas := collectPragmas(opts)
 
 	dbName := fmt.Sprintf("testdb%d", testDBCounter.Add(1))
-	conn, err := sql.Open(driver.name, driver.memoryDSN(dbName, "immediate", params, pragmas))
+	conn, err := sql.Open(driver.Name, driver.MemoryDSN(dbName, "immediate", params, pragmas))
 	if err != nil {
 		panic(err)
 	}
@@ -182,7 +183,7 @@ type Option struct {
 	onClose   func(path string, db *sql.DB)
 	dsnParams string
 	pragmas   [][2]string
-	driver    *DriverConfig
+	driver    *drivers.Config
 }
 
 // OnOpen registers fn to be called with the database file path and the live
@@ -233,88 +234,11 @@ func WithPragma(name, value string) Option {
 }
 
 // WithDriver selects the SQLite driver used by this DB or Pool. If not set,
-// sqlflow defaults to MattnDriver. You must separately import the driver
-// package in your program for the driver to be registered with database/sql.
-func WithDriver(d DriverConfig) Option {
+// sqlflow defaults to drivers.Mattn. Prefer the driver sub-packages
+// (drivers/mattn, drivers/modernc, drivers/ncruces) which register the driver
+// and provide a ready-to-use Option in a single import.
+func WithDriver(d drivers.Config) Option {
 	return Option{driver: &d}
-}
-
-// DriverConfig holds everything sqlflow needs to open connections for a
-// specific SQLite driver. Use the pre-built vars (MattnDriver, ModerncDriver,
-// NcrucesDriver) rather than constructing one directly.
-type DriverConfig struct {
-	// name is the driver name passed to sql.Open.
-	name string
-
-	// buildDSN builds a file-backed database DSN.
-	buildDSN func(path, txlock string, params url.Values, pragmas [][2]string) string
-
-	// buildCipherDSN builds an encrypted database DSN. Nil if unsupported.
-	buildCipherDSN func(path, txlock string, key []byte, params url.Values, pragmas [][2]string) string
-
-	// memoryDSN builds an in-memory database DSN.
-	// memoryDSN builds an in-memory DSN. name is a unique identifier that
-	// drivers requiring shared-cache in-memory databases (e.g. modernc) must use
-	// to isolate parallel TestDB calls from each other.
-	memoryDSN func(name, txlock string, params url.Values, pragmas [][2]string) string
-
-	// isPermanentErr reports whether err is a connection error that should
-	// never be retried.
-	isPermanentErr func(error) bool
-}
-
-// MattnDriver configures sqlflow to use the mattn/go-sqlite3 driver. It is the
-// default when no WithDriver option is passed. Import the driver in your program:
-//
-//	import _ "github.com/mattn/go-sqlite3"
-var MattnDriver = DriverConfig{
-	name: "sqlite3",
-	buildDSN: func(path, txlock string, params url.Values, pragmas [][2]string) string {
-		return mattnBuildDSN(path, txlock, params, pragmas)
-	},
-	buildCipherDSN: func(path, txlock string, key []byte, params url.Values, pragmas [][2]string) string {
-		return mattnBuildCipherDSN(path, txlock, key, params, pragmas)
-	},
-	memoryDSN: func(_, txlock string, params url.Values, pragmas [][2]string) string {
-		return mattnBuildDSN(":memory:", txlock, params, pragmas)
-	},
-	isPermanentErr: func(err error) bool {
-		// SQLITE_NOTADB (error 26) — file is not a database or cipher key is wrong.
-		return strings.Contains(err.Error(), "file is not a database")
-	},
-}
-
-// ModerncDriver configures sqlflow to use the modernc.org/sqlite driver
-// (pure Go, no CGo). Import the driver in your program:
-//
-//	import _ "modernc.org/sqlite"
-var ModerncDriver = DriverConfig{
-	name: "sqlite",
-	buildDSN: func(path, txlock string, params url.Values, pragmas [][2]string) string {
-		return pragmaBuildDSN(path, txlock, params, pragmas)
-	},
-	buildCipherDSN: nil,
-	memoryDSN: func(name, txlock string, params url.Values, pragmas [][2]string) string {
-		return pragmaInMemoryDSN(true, name, txlock, params, pragmas)
-	},
-	isPermanentErr: func(error) bool { return false },
-}
-
-// NcrucesDriver configures sqlflow to use the github.com/ncruces/go-sqlite3
-// driver (WebAssembly, no CGo). Import the driver in your program:
-//
-//	import _ "github.com/ncruces/go-sqlite3/driver"
-//	import _ "github.com/ncruces/go-sqlite3/embed"
-var NcrucesDriver = DriverConfig{
-	name: "sqlite3",
-	buildDSN: func(path, txlock string, params url.Values, pragmas [][2]string) string {
-		return pragmaBuildDSN(path, txlock, params, pragmas)
-	},
-	buildCipherDSN: nil,
-	memoryDSN: func(_, txlock string, params url.Values, pragmas [][2]string) string {
-		return pragmaInMemoryDSN(false, ":memory:", txlock, params, pragmas)
-	},
-	isPermanentErr: func(error) bool { return false },
 }
 
 // Close calls the OnClose hook (if any) exactly once, then closes both the
@@ -639,8 +563,8 @@ func collectPragmas(opts []Option) [][2]string {
 	return pragmas
 }
 
-func collectDriver(opts []Option) DriverConfig {
-	d := MattnDriver
+func collectDriver(opts []Option) drivers.Config {
+	d := drivers.Mattn
 
 	for _, opt := range opts {
 		if opt.driver != nil {
@@ -702,24 +626,24 @@ func openDBConns[Queries any, D DBTX](dbName string, querier Querier[Queries, D]
 	var wDSN, rDSN string
 
 	if len(key) > 0 {
-		if driver.buildCipherDSN == nil {
+		if driver.BuildCipherDSN == nil {
 			return nil, ErrEncryptionNotSupported
 		}
 
-		wDSN = driver.buildCipherDSN(dbName, "immediate", key, params, pragmas)
-		rDSN = driver.buildCipherDSN(dbName, "deferred", key, params, pragmas)
+		wDSN = driver.BuildCipherDSN(dbName, "immediate", key, params, pragmas)
+		rDSN = driver.BuildCipherDSN(dbName, "deferred", key, params, pragmas)
 	} else {
-		wDSN = driver.buildDSN(dbName, "immediate", params, pragmas)
-		rDSN = driver.buildDSN(dbName, "deferred", params, pragmas)
+		wDSN = driver.BuildDSN(dbName, "immediate", params, pragmas)
+		rDSN = driver.BuildDSN(dbName, "deferred", params, pragmas)
 	}
 
-	wrdb, err := sql.Open(driver.name, wDSN)
+	wrdb, err := sql.Open(driver.Name, wDSN)
 	if err != nil {
 		return nil, err
 	}
 	wrdb.SetMaxOpenConns(1)
 
-	rddb, err := sql.Open(driver.name, rDSN)
+	rddb, err := sql.Open(driver.Name, rDSN)
 	if err != nil {
 		wrdb.Close()
 
@@ -906,198 +830,6 @@ func newPoolCache[Queries any, D DBTX](maxCached int64) (*ristretto.Cache[string
 	})
 }
 
-// mattnBuildDSN builds a flat-param DSN for the mattn/go-sqlite3 driver.
-func mattnBuildDSN(path, txlock string, userParams url.Values, pragmas [][2]string) string {
-	merged := make(url.Values, len(userParams)+6)
-	maps.Copy(merged, userParams)
-
-	// Strip cipher params — use OpenEncryptedDB for encrypted databases.
-	delete(merged, "_key")
-	delete(merged, "_cipher")
-
-	// Apply sqlflow defaults for tuning params the caller did not set.
-	if merged.Get("_sync") == "" {
-		merged.Set("_sync", "1")
-	}
-	if merged.Get("_busy_timeout") == "" {
-		merged.Set("_busy_timeout", "5000")
-	}
-	if merged.Get("_cache_size") == "" {
-		merged.Set("_cache_size", "10000")
-	}
-
-	// Apply WithPragma pragmas as flat params, skipping locked ones.
-	for _, p := range pragmas {
-		if strings.EqualFold(p[0], "journal_mode") || strings.EqualFold(p[0], "txlock") {
-			continue
-		}
-		merged.Set("_"+p[0], p[1])
-	}
-
-	// Lock correctness-critical params — these always win.
-	merged.Set("_journal", "wal")
-	merged.Set("_txlock", txlock)
-
-	return path + "?" + merged.Encode()
-}
-
-// mattnBuildCipherDSN builds an encrypted DSN for the jgiannuzzi fork of
-// mattn/go-sqlite3. The fork applies PRAGMA key before any file-accessing
-// pragmas so that WAL and synchronous settings work correctly on existing
-// encrypted databases.
-func mattnBuildCipherDSN(path, txlock string, key []byte, userParams url.Values, pragmas [][2]string) string {
-	merged := make(url.Values, len(userParams)+7)
-	maps.Copy(merged, userParams)
-
-	// Apply sqlflow defaults for tuning params the caller did not set.
-	if merged.Get("_sync") == "" {
-		merged.Set("_sync", "1")
-	}
-	if merged.Get("_busy_timeout") == "" {
-		merged.Set("_busy_timeout", "5000")
-	}
-	if merged.Get("_cache_size") == "" {
-		merged.Set("_cache_size", "10000")
-	}
-
-	// Apply WithPragma pragmas as flat params, skipping locked ones.
-	for _, p := range pragmas {
-		if strings.EqualFold(p[0], "journal_mode") || strings.EqualFold(p[0], "txlock") {
-			continue
-		}
-		merged.Set("_"+p[0], p[1])
-	}
-
-	// Lock correctness-critical and cipher params — these always win.
-	merged.Set("_journal", "wal")
-	merged.Set("_txlock", txlock)
-	merged.Set("_cipher", "sqlcipher")
-	merged.Set("_key", "x'"+hex.EncodeToString(key)+"'")
-
-	return path + "?" + merged.Encode()
-}
-
-// pragmaQueryValues builds the shared url.Values for pragma-style DSNs used
-// by the modernc and ncruces drivers. It applies defaults, user overrides, and
-// locked params using the _pragma=name(value) query format.
-func pragmaQueryValues(txlock string, userParams url.Values, pragmas [][2]string) url.Values {
-	result := make(url.Values)
-
-	// Collect user _pragma values, filtering the locked journal_mode.
-	var userPragmaVals []string
-	for _, pv := range userParams["_pragma"] {
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(pv)), "journal_mode(") {
-			continue
-		}
-		userPragmaVals = append(userPragmaVals, pv)
-	}
-
-	// Translate overridable flat params (_sync, _busy_timeout, _cache_size) from
-	// WithDSNParams into pragma equivalents so they work for modernc/ncruces too.
-	// These map mattn flat-param names to their SQLite pragma names.
-	flatToPragma := [][2]string{
-		{"_sync", "synchronous"},
-		{"_busy_timeout", "busy_timeout"},
-		{"_cache_size", "cache_size"},
-	}
-	for _, mapping := range flatToPragma {
-		if v := userParams.Get(mapping[0]); v != "" {
-			userPragmaVals = append(userPragmaVals, mapping[1]+"("+v+")")
-		}
-	}
-
-	// Copy non-pragma, non-locked flat params from userParams.
-	// Underscore-prefixed params (_name=value) are mattn-style pragma shortcuts;
-	// translate them to pragma(value) format so they work on modernc/ncruces too.
-	for k, vals := range userParams {
-		switch k {
-		case "_key", "_cipher", "_txlock", "_journal", "_sync", "_busy_timeout", "_cache_size":
-			// Skip — locked, cipher-only, or already handled via flatToPragma above.
-		case "_pragma":
-			// Already collected above.
-		default:
-			if strings.HasPrefix(k, "_") {
-				pragmaName := k[1:]
-				for _, v := range vals {
-					userPragmaVals = append(userPragmaVals, pragmaName+"("+v+")")
-				}
-			} else {
-				result[k] = vals
-			}
-		}
-	}
-
-	// hasPragma reports whether name is already set by the user.
-	hasPragma := func(name string) bool {
-		prefix := strings.ToLower(name) + "("
-		for _, pv := range userPragmaVals {
-			if strings.HasPrefix(strings.ToLower(strings.TrimSpace(pv)), prefix) {
-				return true
-			}
-		}
-		for _, p := range pragmas {
-			if strings.EqualFold(p[0], name) {
-				return true
-			}
-		}
-
-		return false
-	}
-
-	// Add sqlflow defaults only if not already set by the caller.
-	if !hasPragma("synchronous") {
-		result.Add("_pragma", "synchronous(NORMAL)")
-	}
-	if !hasPragma("busy_timeout") {
-		result.Add("_pragma", "busy_timeout(5000)")
-	}
-	if !hasPragma("cache_size") {
-		result.Add("_pragma", "cache_size(10000)")
-	}
-
-	// Add user _pragma values (already filtered above).
-	for _, pv := range userPragmaVals {
-		result.Add("_pragma", pv)
-	}
-
-	// Add WithPragma pragmas, skipping the locked journal_mode.
-	for _, p := range pragmas {
-		if strings.EqualFold(p[0], "journal_mode") {
-			continue
-		}
-		result.Add("_pragma", p[0]+"("+p[1]+")")
-	}
-
-	// Lock journal_mode and txlock — these always win.
-	result.Add("_pragma", "journal_mode(WAL)")
-	result.Set("_txlock", txlock)
-
-	return result
-}
-
-// pragmaBuildDSN builds a file: URI DSN using the _pragma=name(value) format
-// used by the modernc and ncruces drivers.
-func pragmaBuildDSN(path, txlock string, userParams url.Values, pragmas [][2]string) string {
-	q := pragmaQueryValues(txlock, userParams, pragmas)
-
-	return "file:" + path + "?" + q.Encode()
-}
-
-// pragmaInMemoryDSN builds an in-memory DSN for pragma-style drivers.
-// name is the database name in the URI (unique per TestDB call for drivers that
-// require shared-cache). shared adds cache=shared, which is required by modernc
-// for in-memory databases opened across multiple connections.
-func pragmaInMemoryDSN(shared bool, name, txlock string, userParams url.Values, pragmas [][2]string) string {
-	q := pragmaQueryValues(txlock, userParams, pragmas)
-	q.Set("mode", "memory")
-
-	if shared {
-		q.Set("cache", "shared")
-	}
-
-	return "file:" + name + "?" + q.Encode()
-}
-
 func (db *DB[Queries, D]) transaction(ctx context.Context, rdbms *sql.DB, f func(*Queries) error) error {
 	tx, err := rdbms.BeginTx(ctx, nil)
 	if err != nil {
@@ -1107,7 +839,7 @@ func (db *DB[Queries, D]) transaction(ctx context.Context, rdbms *sql.DB, f func
 		}
 
 		// Driver-specific permanent errors (e.g. SQLITE_NOTADB for mattn).
-		if db.driver.isPermanentErr(err) {
+		if db.driver.IsPermanentErr(err) {
 			return backoff.Permanent(fmt.Errorf("error creating transaction: %w", err))
 		}
 
