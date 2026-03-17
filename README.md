@@ -31,6 +31,7 @@ queries as methods to a type that wraps `database/sql.{DB,Tx}` connections.
   - [Per-key connection pool — Pool\[Q\]](#per-key-connection-pool--poolq)
   - [Testing](#testing)
 - [License](#license)
+- [Contributing](#contributing)
 
 ## Installation
 
@@ -587,3 +588,7 @@ go test ./... -tags ncruces    # ncruces
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
