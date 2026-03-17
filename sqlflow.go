@@ -384,8 +384,8 @@ func NewPool[Queries any, D DBTX](
 // Call SetInactivityTimeout to enable the background eviction reaper.
 //
 // Encryption requires a SQLCipher-enabled driver. Use the jgiannuzzi fork of
-// mattn/go-sqlite3 and pass WithDriver(MattnDriver) (the default). Other
-// drivers return ErrEncryptionNotSupported when the first database is opened.
+// mattn/go-sqlite3 with the drivers/mattn sub-package. Other drivers return
+// ErrEncryptionNotSupported when the first database is opened.
 func NewEncryptedPool[Queries any, D DBTX](
 	dir string, querier Querier[Queries, D], maxCached int64,
 	keyProvider func(string) ([]byte, bool), opts ...Option,

@@ -47,9 +47,6 @@ import "github.com/avalonbits/sqlflow/drivers/ncruces"
 db, err := sqlflow.OpenDB(path, querier, ncruces.Driver, ...)
 ```
 
-If `mattn.Driver` is omitted entirely, sqlflow defaults to the mattn driver (requires
-a separate blank-import of `github.com/mattn/go-sqlite3`).
-
 > [!NOTE]
 > mattn and ncruces both register as `"sqlite3"` — they cannot coexist in the same binary.
 > modernc registers as `"sqlite"` and can coexist with ncruces.
@@ -80,8 +77,7 @@ func main() {
 		path,
 		// A Querier function — sqlflow calls it with the open transaction.
 		newKV,
-		// Select the driver. Omit to default to MattnDriver (requires
-		// a blank import of github.com/mattn/go-sqlite3 instead).
+		// Select the driver.
 		mattn.Driver,
 		// migrators.Goose applies migrations on open.
 		migrators.Goose(migrations),
@@ -222,16 +218,15 @@ else — the Querier type, the closure shape, the Read/Write semantics — is id
 sqlflow supports at-rest encryption through [SQLCipher](https://www.zetetic.net/sqlcipher/),
 a SQLite extension that encrypts the entire database file with AES-256.
 
-Encryption requires `MattnDriver` and the [jgiannuzzi/go-sqlite3](https://github.com/jgiannuzzi/go-sqlite3)
+Encryption requires `mattn.Driver` and the [jgiannuzzi/go-sqlite3](https://github.com/jgiannuzzi/go-sqlite3)
 fork (which bundles SQLCipher). Add the replace directive to your `go.mod`:
 
 ```
 replace github.com/mattn/go-sqlite3 => github.com/jgiannuzzi/go-sqlite3 v1.14.35-0.20260227142656-2c447b9a2806
 ```
 
-Then use `OpenEncryptedDB` (single database) or `NewEncryptedPool` (per-key pool) and pass
-`WithDriver(sqlflow.MattnDriver)`. Both accept a 32-byte key; sqlflow passes it to the driver via DSN
-parameters at open time.
+Then use `OpenEncryptedDB` (single database) or `NewEncryptedPool` (per-key pool). Both accept a
+32-byte key; sqlflow passes it to the driver via DSN parameters at open time.
 
 ```go
 import "github.com/avalonbits/sqlflow/drivers/mattn" // must use the jgiannuzzi fork
@@ -245,7 +240,7 @@ db, err := sqlflow.OpenEncryptedDB(
 )
 ```
 
-Calling `OpenEncryptedDB` or `NewEncryptedPool` with `ModerncDriver` or `NcrucesDriver` returns
+Calling `OpenEncryptedDB` or `NewEncryptedPool` with `modernc.Driver` or `ncruces.Driver` returns
 `sqlflow.ErrEncryptionNotSupported` immediately.
 
 ## Concepts
@@ -375,7 +370,7 @@ accept a variadic `...Option` that configures the database:
 
 | Option | Description |
 |--------|-------------|
-| `mattn.Driver` / `modernc.Driver` / `ncruces.Driver` | Select the SQLite driver (from the `drivers/` sub-packages). Defaults to mattn if omitted. |
+| `mattn.Driver` / `modernc.Driver` / `ncruces.Driver` | Select the SQLite driver (from the `drivers/` sub-packages). Required. |
 | `WithDSNParams(params)` | Pass connection parameters using the mattn DSN query-string syntax. |
 | `WithPragma(name, value)` | Set a SQLite PRAGMA on open, cross-driver. |
 | `OnOpen(fn)` | Hook called with `(path string, db *sql.DB)` just after the database is opened. Errors abort the open. |
