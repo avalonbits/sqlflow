@@ -16,6 +16,7 @@ queries as methods to a type that wraps `database/sql.{DB,Tx}` connections.
 ## Table of contents
 
 - [Installation](#installation)
+- [Contributing](#contributing)
 - [Driver selection](#driver-selection)
 - [Usage](#usage)
 - [Pool usage](#pool-usage)
@@ -31,7 +32,6 @@ queries as methods to a type that wraps `database/sql.{DB,Tx}` connections.
   - [Per-key connection pool — Pool\[Q\]](#per-key-connection-pool--poolq)
   - [Testing](#testing)
 - [License](#license)
-- [Contributing](#contributing)
 
 ## Installation
 
@@ -40,6 +40,10 @@ go get github.com/avalonbits/sqlflow
 ```
 
 Then pick a driver sub-package (see [Driver selection](#driver-selection) below).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Driver selection
 
@@ -588,7 +592,3 @@ go test ./... -tags ncruces    # ncruces
 ## License
 
 MIT — see [LICENSE](LICENSE).
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md).
