@@ -13,6 +13,25 @@ for you, so you never touch a raw connection directly.
 This package works nicely with [sqlc.dev](https://sqlc.dev), which creates named
 queries as methods to a type that wraps `database/sql.{DB,Tx}` connections.
 
+## Table of contents
+
+- [Installation](#installation)
+- [Driver selection](#driver-selection)
+- [Usage](#usage)
+- [Pool usage](#pool-usage)
+- [Encryption](#encryption)
+- [Using with sqlc](#using-with-sqlc)
+- [Concepts](#concepts)
+  - [Read and Write](#read-and-write)
+  - [Querier](#querier)
+  - [Migrations](#migrations)
+  - [Options](#options)
+  - [Connection parameters](#connection-parameters)
+  - [Single database — DB\[Q\]](#single-database--dbq)
+  - [Per-key connection pool — Pool\[Q\]](#per-key-connection-pool--poolq)
+  - [Testing](#testing)
+- [License](#license)
+
 ## Installation
 
 ```sh
