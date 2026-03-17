@@ -67,19 +67,25 @@ type dbCase struct {
 }
 
 func dbCases() []dbCase {
-	key := make([]byte, 32)
-	for i := range key {
-		key[i] = byte(i + 1)
+	cases := []dbCase{{name: "plain", key: nil}}
+
+	if testDriverSupportsEncryption {
+		key := make([]byte, 32)
+		for i := range key {
+			key[i] = byte(i + 1)
+		}
+
+		cases = append(cases, dbCase{name: "encrypted", key: key})
 	}
 
-	return []dbCase{
-		{name: "plain", key: nil},
-		{name: "encrypted", key: key},
-	}
+	return cases
 }
 
-// openGetDB calls OpenDB or OpenEncryptedDB based on whether key is nil.
+// openDB calls OpenDB or OpenEncryptedDB based on whether key is nil.
+// It always prepends WithDriver(testDriver) so every test uses the active driver.
 func openDB(path string, key []byte, opts ...sqlflow.Option) (*sqlflow.DB[kvQuerier, sqlflow.DBTX], error) {
+	opts = append([]sqlflow.Option{sqlflow.WithDriver(testDriver)}, opts...)
+
 	if len(key) > 0 {
 		return sqlflow.OpenEncryptedDB(path, newQuerier(), key, opts...)
 	}
@@ -94,7 +100,7 @@ func openDB(path string, key []byte, opts ...sqlflow.Option) (*sqlflow.DB[kvQuer
 func TestTestDB(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
+	db := sqlflow.TestDB(newQuerier(), sqlflow.WithDriver(testDriver), migrators.Goose(embedFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -202,6 +208,10 @@ func TestGetDB_BadPath(t *testing.T) {
 func TestOpenEncryptedDB_WrongKey(t *testing.T) {
 	t.Parallel()
 
+	if !testDriverSupportsEncryption {
+		t.Skip("encryption not supported by active driver")
+	}
+
 	goodKey := make([]byte, 32)
 	for i := range goodKey {
 		goodKey[i] = byte(i + 1)
@@ -239,7 +249,7 @@ func TestOpenEncryptedDB_WrongKey(t *testing.T) {
 func TestDB_WriteRead(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
+	db := sqlflow.TestDB(newQuerier(), sqlflow.WithDriver(testDriver), migrators.Goose(embedFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -270,7 +280,7 @@ func TestDB_WriteRead(t *testing.T) {
 func TestDB_WriteOverwrite(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
+	db := sqlflow.TestDB(newQuerier(), sqlflow.WithDriver(testDriver), migrators.Goose(embedFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -299,7 +309,7 @@ func TestDB_WriteOverwrite(t *testing.T) {
 func TestDB_Read_NotFound(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
+	db := sqlflow.TestDB(newQuerier(), sqlflow.WithDriver(testDriver), migrators.Goose(embedFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -315,7 +325,7 @@ func TestDB_Read_NotFound(t *testing.T) {
 func TestDB_ConcurrentReads(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
+	db := sqlflow.TestDB(newQuerier(), sqlflow.WithDriver(testDriver), migrators.Goose(embedFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -346,7 +356,7 @@ func TestDB_ConcurrentReads(t *testing.T) {
 func TestDB_ConcurrentWrites(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
+	db := sqlflow.TestDB(newQuerier(), sqlflow.WithDriver(testDriver), migrators.Goose(embedFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -385,7 +395,7 @@ func TestDB_ConcurrentWrites(t *testing.T) {
 func TestDB_ConcurrentReadWrite(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
+	db := sqlflow.TestDB(newQuerier(), sqlflow.WithDriver(testDriver), migrators.Goose(embedFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -423,7 +433,7 @@ func TestDB_ConcurrentReadWrite(t *testing.T) {
 func TestDB_Write_ContextCancel(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
+	db := sqlflow.TestDB(newQuerier(), sqlflow.WithDriver(testDriver), migrators.Goose(embedFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -448,7 +458,7 @@ func TestDB_Write_ContextCancel(t *testing.T) {
 func TestDB_Write_FuncError(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
+	db := sqlflow.TestDB(newQuerier(), sqlflow.WithDriver(testDriver), migrators.Goose(embedFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -462,7 +472,7 @@ func TestDB_Write_FuncError(t *testing.T) {
 func TestDB_Write_Rollback(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
+	db := sqlflow.TestDB(newQuerier(), sqlflow.WithDriver(testDriver), migrators.Goose(embedFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -501,6 +511,7 @@ func TestDB_Checkpoint(t *testing.T) {
 			db, err := sqlflow.OpenDB(
 				filepath.Join(t.TempDir(), "ckpt.db"),
 				newQuerier(),
+				sqlflow.WithDriver(testDriver),
 				migrators.Goose(embedFS()),
 			)
 			if err != nil {
@@ -537,7 +548,7 @@ func TestDB_Checkpoint(t *testing.T) {
 func TestDB_Close(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
+	db := sqlflow.TestDB(newQuerier(), sqlflow.WithDriver(testDriver), migrators.Goose(embedFS()))
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -555,7 +566,7 @@ func TestDB_Close(t *testing.T) {
 func TestDB_Close_Idempotent(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newQuerier(), migrators.Goose(embedFS()))
+	db := sqlflow.TestDB(newQuerier(), sqlflow.WithDriver(testDriver), migrators.Goose(embedFS()))
 	db.Close() //nolint
 
 	// Second close should not panic.
@@ -616,6 +627,7 @@ func TestTestDB_OnOpen_Called(t *testing.T) {
 
 	var gotPath string
 	db := sqlflow.TestDB(newQuerier(),
+		sqlflow.WithDriver(testDriver),
 		sqlflow.OnOpen(func(p string, _ *sql.DB) error {
 			gotPath = p
 			return nil
@@ -638,6 +650,7 @@ func TestTestDB_OnOpen_Error_Panics(t *testing.T) {
 	}()
 
 	sqlflow.TestDB(newQuerier(),
+		sqlflow.WithDriver(testDriver),
 		sqlflow.OnOpen(func(string, *sql.DB) error {
 			return errors.New("hook failure")
 		}),
@@ -698,6 +711,7 @@ func TestTestDB_OnClose_Called(t *testing.T) {
 
 	var called bool
 	db := sqlflow.TestDB(newQuerier(),
+		sqlflow.WithDriver(testDriver),
 		sqlflow.OnClose(func(_ string, _ *sql.DB) { called = true }),
 	)
 
@@ -767,7 +781,7 @@ func TestNoRows(t *testing.T) {
 func TestTestPool(t *testing.T) {
 	t.Parallel()
 
-	p := sqlflow.TestPool(t.TempDir(), newQuerier(), gooseOpt())
+	p := sqlflow.TestPool(t.TempDir(), newQuerier(), sqlflow.WithDriver(testDriver), gooseOpt())
 	defer p.Close()
 
 	ctx := context.Background()
@@ -794,7 +808,7 @@ func TestNewPool_CreatesDir(t *testing.T) {
 	t.Parallel()
 
 	dir := filepath.Join(t.TempDir(), "sub", "pool")
-	p, err := sqlflow.NewPool(dir, newQuerier(), 1000, gooseOpt())
+	p, err := sqlflow.NewPool(dir, newQuerier(), 1000, sqlflow.WithDriver(testDriver), gooseOpt())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -814,7 +828,7 @@ func TestNewPool_BadDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := sqlflow.NewPool(filepath.Join(blocker, "pool"), newQuerier(), 1000, gooseOpt())
+	_, err := sqlflow.NewPool(filepath.Join(blocker, "pool"), newQuerier(), 1000, sqlflow.WithDriver(testDriver), gooseOpt())
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -829,6 +843,7 @@ func TestPool_OnOpen_Called(t *testing.T) {
 	var openedPaths []string
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
+		sqlflow.WithDriver(testDriver),
 		gooseOpt(),
 		sqlflow.OnOpen(func(path string, _ *sql.DB) error {
 			mu.Lock()
@@ -861,6 +876,7 @@ func TestPool_OnClose_OnEvict(t *testing.T) {
 	var closed bool
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
+		sqlflow.WithDriver(testDriver),
 		gooseOpt(),
 		sqlflow.OnClose(func(_ string, _ *sql.DB) { closed = true }),
 	)
@@ -886,6 +902,7 @@ func TestPool_OnClose_OnPoolClose(t *testing.T) {
 	var closed bool
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
+		sqlflow.WithDriver(testDriver),
 		gooseOpt(),
 		sqlflow.OnClose(func(_ string, _ *sql.DB) { closed = true }),
 	)
@@ -908,6 +925,7 @@ func TestPool_OnOpen_Error(t *testing.T) {
 	sentinel := errors.New("db open hook failed")
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
+		sqlflow.WithDriver(testDriver),
 		sqlflow.OnOpen(func(string, *sql.DB) error { return sentinel }),
 	)
 	defer p.Close()
@@ -925,6 +943,7 @@ func TestPool_WriteRead(t *testing.T) {
 	t.Parallel()
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
+		sqlflow.WithDriver(testDriver),
 		gooseOpt(),
 	)
 	defer p.Close()
@@ -958,6 +977,7 @@ func TestPool_IsolatedKeys(t *testing.T) {
 	t.Parallel()
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
+		sqlflow.WithDriver(testDriver),
 		gooseOpt(),
 	)
 	defer p.Close()
@@ -982,6 +1002,7 @@ func TestPool_ConcurrentAccess(t *testing.T) {
 	t.Parallel()
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
+		sqlflow.WithDriver(testDriver),
 		gooseOpt(),
 	)
 	defer p.Close()
@@ -1014,6 +1035,7 @@ func TestPool_Write_FuncError(t *testing.T) {
 	t.Parallel()
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
+		sqlflow.WithDriver(testDriver),
 		gooseOpt(),
 	)
 	defer p.Close()
@@ -1030,6 +1052,7 @@ func TestPool_Read_NotFound(t *testing.T) {
 	t.Parallel()
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
+		sqlflow.WithDriver(testDriver),
 		gooseOpt(),
 	)
 	defer p.Close()
@@ -1050,6 +1073,7 @@ func TestPool_KeyNotAvailable(t *testing.T) {
 	p, err := sqlflow.NewEncryptedPool(
 		t.TempDir(), newQuerier(), 1000,
 		func(string) ([]byte, bool) { return nil, false },
+		sqlflow.WithDriver(testDriver),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1069,6 +1093,7 @@ func TestPool_Evict(t *testing.T) {
 	t.Parallel()
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
+		sqlflow.WithDriver(testDriver),
 		gooseOpt(),
 	)
 	defer p.Close()
@@ -1090,6 +1115,7 @@ func TestPool_Evict_WhileInFlight(t *testing.T) {
 	t.Parallel()
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
+		sqlflow.WithDriver(testDriver),
 		gooseOpt(),
 	)
 	defer p.Close()
@@ -1116,6 +1142,7 @@ func TestPool_Evict_NonExistent(t *testing.T) {
 	t.Parallel()
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
+		sqlflow.WithDriver(testDriver),
 		gooseOpt(),
 	)
 	defer p.Close()
@@ -1151,6 +1178,7 @@ func TestPool_ListKeys(t *testing.T) {
 			t.Parallel()
 
 			p := sqlflow.TestPool(t.TempDir(), newQuerier(),
+				sqlflow.WithDriver(testDriver),
 				gooseOpt(),
 			)
 			defer p.Close()
@@ -1185,7 +1213,7 @@ func TestPool_ListKeys(t *testing.T) {
 func TestPool_InactivityReaper(t *testing.T) {
 	t.Parallel()
 
-	p, err := sqlflow.NewPool(t.TempDir(), newQuerier(), 1000, gooseOpt())
+	p, err := sqlflow.NewPool(t.TempDir(), newQuerier(), 1000, sqlflow.WithDriver(testDriver), gooseOpt())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1209,7 +1237,7 @@ func TestPool_InactivityReaper(t *testing.T) {
 func TestPool_InactivityReaper_ActiveNotEvicted(t *testing.T) {
 	t.Parallel()
 
-	p, err := sqlflow.NewPool(t.TempDir(), newQuerier(), 1000, gooseOpt())
+	p, err := sqlflow.NewPool(t.TempDir(), newQuerier(), 1000, sqlflow.WithDriver(testDriver), gooseOpt())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1245,6 +1273,7 @@ func TestPool_Close(t *testing.T) {
 	t.Parallel()
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
+		sqlflow.WithDriver(testDriver),
 		gooseOpt(),
 	)
 	ctx := context.Background()
@@ -1259,6 +1288,7 @@ func TestPool_Close_DrainsInFlight(t *testing.T) {
 	t.Parallel()
 
 	p := sqlflow.TestPool(t.TempDir(), newQuerier(),
+		sqlflow.WithDriver(testDriver),
 		gooseOpt(),
 	)
 	ctx := context.Background()
@@ -1391,6 +1421,7 @@ func TestWithDSNParams_Pool(t *testing.T) {
 	p := sqlflow.TestPool(
 		t.TempDir(),
 		newQuerier(),
+		sqlflow.WithDriver(testDriver),
 		gooseOpt(),
 		sqlflow.WithDSNParams("_foreign_keys=1"),
 		sqlflow.OnOpen(func(_ string, conn *sql.DB) error {
