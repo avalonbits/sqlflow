@@ -22,6 +22,8 @@
 package ncruces
 
 import (
+	"net/url"
+
 	"github.com/avalonbits/sqlflow"
 	"github.com/avalonbits/sqlflow/drivers"
 
@@ -31,4 +33,14 @@ import (
 
 // Driver is the sqlflow option that registers and selects the
 // ncruces/go-sqlite3 SQLite driver. Pass it to any sqlflow constructor.
-var Driver = sqlflow.WithDriver(drivers.Ncruces)
+var Driver = sqlflow.WithDriver(config)
+
+var config = drivers.Config{
+	Name:           "sqlite3",
+	BuildDSN:       drivers.PragmaBuildDSN,
+	BuildCipherDSN: nil,
+	MemoryDSN: func(_, txlock string, params url.Values, pragmas [][2]string) string {
+		return drivers.PragmaInMemoryDSN(false, ":memory:", txlock, params, pragmas)
+	},
+	IsPermanentErr: func(error) bool { return false },
+}

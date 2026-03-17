@@ -243,13 +243,13 @@ func TestOpenEncryptedDB_WrongKey(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "enc.db")
-	db, err := sqlflow.OpenEncryptedDB(path, newQuerier(), goodKey, migrators.Goose(embedFS()))
+	db, err := sqlflow.OpenEncryptedDB(path, newQuerier(), goodKey, testDriver, migrators.Goose(embedFS()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 
-	db2, err := sqlflow.OpenEncryptedDB(path, newQuerier(), badKey)
+	db2, err := sqlflow.OpenEncryptedDB(path, newQuerier(), badKey, testDriver)
 	if err != nil {
 		t.Fatal(err)
 	}

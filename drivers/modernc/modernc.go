@@ -16,6 +16,8 @@
 package modernc
 
 import (
+	"net/url"
+
 	"github.com/avalonbits/sqlflow"
 	"github.com/avalonbits/sqlflow/drivers"
 
@@ -24,4 +26,14 @@ import (
 
 // Driver is the sqlflow option that registers and selects the modernc.org/sqlite
 // SQLite driver. Pass it to any sqlflow constructor.
-var Driver = sqlflow.WithDriver(drivers.Modernc)
+var Driver = sqlflow.WithDriver(config)
+
+var config = drivers.Config{
+	Name:           "sqlite",
+	BuildDSN:       drivers.PragmaBuildDSN,
+	BuildCipherDSN: nil,
+	MemoryDSN: func(name, txlock string, params url.Values, pragmas [][2]string) string {
+		return drivers.PragmaInMemoryDSN(true, name, txlock, params, pragmas)
+	},
+	IsPermanentErr: func(error) bool { return false },
+}

@@ -27,8 +27,8 @@
 //	import "github.com/avalonbits/sqlflow/drivers/modernc" // modernc (pure Go)
 //	import "github.com/avalonbits/sqlflow/drivers/ncruces" // ncruces (WebAssembly)
 //
-// If no driver option is passed, sqlflow defaults to drivers.Mattn (requires a
-// separate blank-import of github.com/mattn/go-sqlite3).
+// A driver option is required. Use one of the drivers/* sub-packages which
+// register the driver and provide a ready-to-use Option in a single import.
 //
 // Migrations are decoupled from the core: pass migrators.Goose(fsys) as an
 // Option to run goose-based schema migrations on open, or implement your own
@@ -129,6 +129,10 @@ type DB[Queries any, D DBTX] struct {
 // Panics on any error so test setup stays concise.
 func TestDB[Queries any, D DBTX](querier Querier[Queries, D], opts ...Option) *DB[Queries, D] {
 	driver := collectDriver(opts)
+	if driver.MemoryDSN == nil {
+		panic("sqlflow: no SQLite driver configured; pass one of drivers/mattn, drivers/modernc, or drivers/ncruces as an option")
+	}
+
 	params := collectDSNParams(opts)
 	pragmas := collectPragmas(opts)
 
@@ -233,10 +237,10 @@ func WithPragma(name, value string) Option {
 	return Option{pragmas: [][2]string{{name, value}}}
 }
 
-// WithDriver selects the SQLite driver used by this DB or Pool. If not set,
-// sqlflow defaults to drivers.Mattn. Prefer the driver sub-packages
-// (drivers/mattn, drivers/modernc, drivers/ncruces) which register the driver
-// and provide a ready-to-use Option in a single import.
+// WithDriver selects the SQLite driver used by this DB or Pool. A driver option
+// is required. Prefer the driver sub-packages (drivers/mattn, drivers/modernc,
+// drivers/ncruces) which register the driver and provide a ready-to-use Option
+// in a single import.
 func WithDriver(d drivers.Config) Option {
 	return Option{driver: &d}
 }
@@ -564,7 +568,7 @@ func collectPragmas(opts []Option) [][2]string {
 }
 
 func collectDriver(opts []Option) drivers.Config {
-	d := drivers.Mattn
+	var d drivers.Config
 
 	for _, opt := range opts {
 		if opt.driver != nil {
@@ -620,6 +624,10 @@ func newPool[Queries any, D DBTX](
 
 func openDBConns[Queries any, D DBTX](dbName string, querier Querier[Queries, D], key []byte, opts []Option) (*DB[Queries, D], error) {
 	driver := collectDriver(opts)
+	if driver.BuildDSN == nil {
+		return nil, fmt.Errorf("sqlflow: no SQLite driver configured; pass one of drivers/mattn, drivers/modernc, or drivers/ncruces as an option")
+	}
+
 	params := collectDSNParams(opts)
 	pragmas := collectPragmas(opts)
 
