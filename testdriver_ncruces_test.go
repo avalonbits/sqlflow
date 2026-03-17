@@ -2,12 +2,9 @@
 
 package sqlflow_test
 
-import (
-	"github.com/avalonbits/sqlflow"
+import "github.com/avalonbits/sqlflow/drivers/ncruces"
 
-	_ "github.com/ncruces/go-sqlite3/driver"
-	_ "github.com/ncruces/go-sqlite3/embed"
+var (
+	testDriver                   = ncruces.Driver
+	testDriverSupportsEncryption = false
 )
-
-var testDriver = sqlflow.NcrucesDriver
-var testDriverSupportsEncryption = false

@@ -2,11 +2,9 @@
 
 package sqlflow_test
 
-import (
-	"github.com/avalonbits/sqlflow"
+import "github.com/avalonbits/sqlflow/drivers/mattn"
 
-	_ "github.com/mattn/go-sqlite3"
+var (
+	testDriver                   = mattn.Driver
+	testDriverSupportsEncryption = true
 )
-
-var testDriver = sqlflow.MattnDriver
-var testDriverSupportsEncryption = true

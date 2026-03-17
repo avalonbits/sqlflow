@@ -2,11 +2,9 @@
 
 package sqlflow_test
 
-import (
-	"github.com/avalonbits/sqlflow"
+import "github.com/avalonbits/sqlflow/drivers/modernc"
 
-	_ "modernc.org/sqlite"
+var (
+	testDriver                   = modernc.Driver
+	testDriverSupportsEncryption = false
 )
-
-var testDriver = sqlflow.ModerncDriver
-var testDriverSupportsEncryption = false

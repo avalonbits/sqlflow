@@ -38,7 +38,7 @@ func newTestQuerier() sqlflow.Querier[testQuerier, sqlflow.DBTX] {
 func TestGoose_EmbedFS(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newTestQuerier(), sqlflow.WithDriver(testDriver), migrators.Goose(embedFS()))
+	db := sqlflow.TestDB(newTestQuerier(), testDriver, migrators.Goose(embedFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -53,7 +53,7 @@ func TestGoose_EmbedFS(t *testing.T) {
 func TestGoose_DirFS(t *testing.T) {
 	t.Parallel()
 
-	db := sqlflow.TestDB(newTestQuerier(), sqlflow.WithDriver(testDriver), migrators.Goose(dirFS()))
+	db := sqlflow.TestDB(newTestQuerier(), testDriver, migrators.Goose(dirFS()))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -72,13 +72,13 @@ func TestGoose_Idempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.db")
 	gooseOpt := migrators.Goose(embedFS())
 
-	db1, err := sqlflow.OpenDB(path, newTestQuerier(), sqlflow.WithDriver(testDriver), gooseOpt)
+	db1, err := sqlflow.OpenDB(path, newTestQuerier(), testDriver, gooseOpt)
 	if err != nil {
 		t.Fatal(err)
 	}
 	db1.Close()
 
-	db2, err := sqlflow.OpenDB(path, newTestQuerier(), sqlflow.WithDriver(testDriver), gooseOpt)
+	db2, err := sqlflow.OpenDB(path, newTestQuerier(), testDriver, gooseOpt)
 	if err != nil {
 		t.Fatalf("second open after migration: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestGoose_BadFS(t *testing.T) {
 			_, err := sqlflow.OpenDB(
 				filepath.Join(t.TempDir(), "test.db"),
 				newTestQuerier(),
-				sqlflow.WithDriver(testDriver),
+				testDriver,
 				migrators.Goose(tc.fsys),
 			)
 			if err == nil {

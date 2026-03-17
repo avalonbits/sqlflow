@@ -2,10 +2,6 @@
 
 package migrators_test
 
-import (
-	"github.com/avalonbits/sqlflow"
+import "github.com/avalonbits/sqlflow/drivers/mattn"
 
-	_ "github.com/mattn/go-sqlite3"
-)
-
-var testDriver = sqlflow.MattnDriver
+var testDriver = mattn.Driver

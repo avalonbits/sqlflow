@@ -19,35 +19,36 @@ queries as methods to a type that wraps `database/sql.{DB,Tx}` connections.
 go get github.com/avalonbits/sqlflow
 ```
 
-You also need a SQLite driver. See the [Driver selection](#driver-selection) section below.
+Then pick a driver sub-package (see [Driver selection](#driver-selection) below).
 
 ## Driver selection
 
-sqlflow supports three drivers. Import exactly one in your binary and pass the corresponding
-`DriverConfig` via `WithDriver`:
+sqlflow ships three driver sub-packages. Import the one you want — it registers
+the underlying SQLite driver **and** provides the ready-to-use `Option` in a
+single import, with no separate blank-import or `WithDriver` call needed:
 
-| Driver | Import path | `DriverConfig` | CGo | Encryption |
-|--------|-------------|----------------|-----|------------|
-| [mattn/go-sqlite3](https://github.com/mattn/go-sqlite3) | `github.com/mattn/go-sqlite3` | `sqlflow.MattnDriver` | yes | yes (SQLCipher fork) |
-| [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) | `modernc.org/sqlite` | `sqlflow.ModerncDriver` | no | no |
-| [ncruces/go-sqlite3](https://github.com/ncruces/go-sqlite3) | `github.com/ncruces/go-sqlite3/driver` + `/embed` | `sqlflow.NcrucesDriver` | no | no |
-
-If `WithDriver` is omitted, sqlflow defaults to `MattnDriver`.
+| Sub-package | Driver | CGo | Encryption |
+|-------------|--------|-----|------------|
+| `github.com/avalonbits/sqlflow/drivers/mattn` | [mattn/go-sqlite3](https://github.com/mattn/go-sqlite3) | yes | yes (SQLCipher fork) |
+| `github.com/avalonbits/sqlflow/drivers/modernc` | [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) | no | no |
+| `github.com/avalonbits/sqlflow/drivers/ncruces` | [ncruces/go-sqlite3](https://github.com/ncruces/go-sqlite3) | no | no |
 
 ```go
 // mattn (CGo, supports encryption):
-import _ "github.com/mattn/go-sqlite3"
-db, err := sqlflow.OpenDB(path, querier, sqlflow.WithDriver(sqlflow.MattnDriver), ...)
+import "github.com/avalonbits/sqlflow/drivers/mattn"
+db, err := sqlflow.OpenDB(path, querier, mattn.Driver, ...)
 
 // modernc (pure Go):
-import _ "modernc.org/sqlite"
-db, err := sqlflow.OpenDB(path, querier, sqlflow.WithDriver(sqlflow.ModerncDriver), ...)
+import "github.com/avalonbits/sqlflow/drivers/modernc"
+db, err := sqlflow.OpenDB(path, querier, modernc.Driver, ...)
 
 // ncruces (WebAssembly):
-import _ "github.com/ncruces/go-sqlite3/driver"
-import _ "github.com/ncruces/go-sqlite3/embed"
-db, err := sqlflow.OpenDB(path, querier, sqlflow.WithDriver(sqlflow.NcrucesDriver), ...)
+import "github.com/avalonbits/sqlflow/drivers/ncruces"
+db, err := sqlflow.OpenDB(path, querier, ncruces.Driver, ...)
 ```
+
+If `mattn.Driver` is omitted entirely, sqlflow defaults to the mattn driver (requires
+a separate blank-import of `github.com/mattn/go-sqlite3`).
 
 > [!NOTE]
 > mattn and ncruces both register as `"sqlite3"` — they cannot coexist in the same binary.
@@ -65,9 +66,8 @@ import (
 	"os"
 	"testing/fstest"
 
-	_ "github.com/mattn/go-sqlite3" // or modernc / ncruces
-
 	"github.com/avalonbits/sqlflow"
+	"github.com/avalonbits/sqlflow/drivers/mattn" // or modernc / ncruces
 	"github.com/avalonbits/sqlflow/migrators"
 )
 
@@ -80,8 +80,9 @@ func main() {
 		path,
 		// A Querier function — sqlflow calls it with the open transaction.
 		newKV,
-		// Select the driver. Omit to default to MattnDriver.
-		sqlflow.WithDriver(sqlflow.MattnDriver),
+		// Select the driver. Omit to default to MattnDriver (requires
+		// a blank import of github.com/mattn/go-sqlite3 instead).
+		mattn.Driver,
 		// migrators.Goose applies migrations on open.
 		migrators.Goose(migrations),
 	)
@@ -180,11 +181,11 @@ migrations on each user's database the first time it is accessed.
 
 ```go
 pool, err := sqlflow.NewPool(
-    dir,                              // directory where per-user .db files are stored
-    newKV,                            // same Querier factory as OpenDB
-    1_000,                            // max cached open databases
-    sqlflow.WithDriver(sqlflow.MattnDriver), // select driver
-    migrators.Goose(migrations),      // options — same as OpenDB
+    dir,                         // directory where per-user .db files are stored
+    newKV,                       // same Querier factory as OpenDB
+    1_000,                       // max cached open databases
+    mattn.Driver,                // select driver
+    migrators.Goose(migrations), // options — same as OpenDB
 )
 if err != nil {
     log.Fatal(err)
@@ -233,13 +234,13 @@ Then use `OpenEncryptedDB` (single database) or `NewEncryptedPool` (per-key pool
 parameters at open time.
 
 ```go
-import _ "github.com/mattn/go-sqlite3" // must be the jgiannuzzi fork
+import "github.com/avalonbits/sqlflow/drivers/mattn" // must use the jgiannuzzi fork
 
 key := make([]byte, 32) // fill with your 32-byte key
 
 db, err := sqlflow.OpenEncryptedDB(
     path, querier, key,
-    sqlflow.WithDriver(sqlflow.MattnDriver),
+    mattn.Driver,
     migrators.Goose(fsys),
 )
 ```
@@ -314,7 +315,7 @@ directly — no adapter wrapper is needed:
 //   func New(db DBTX) *Queries { return &Queries{db: db} }
 //
 // Pass it straight to OpenDB — type parameters are inferred automatically:
-db, err := sqlflow.OpenDB(path, mypackage.New, sqlflow.WithDriver(sqlflow.MattnDriver), migrators.Goose(fsys))
+db, err := sqlflow.OpenDB(path, mypackage.New, mattn.Driver, migrators.Goose(fsys))
 ```
 
 For hand-written accessors, use `sqlflow.DBTX` directly:
@@ -374,7 +375,7 @@ accept a variadic `...Option` that configures the database:
 
 | Option | Description |
 |--------|-------------|
-| `WithDriver(cfg)` | Select the SQLite driver. Defaults to `MattnDriver` if omitted. |
+| `mattn.Driver` / `modernc.Driver` / `ncruces.Driver` | Select the SQLite driver (from the `drivers/` sub-packages). Defaults to mattn if omitted. |
 | `WithDSNParams(params)` | Append extra DSN parameters (URL query string). Locked params (`_txlock`, `_journal`) are ignored; overridable defaults (`_sync`, `_busy_timeout`, `_cache_size`) can be replaced. Underscore-prefixed params are translated to `_pragma=name(value)` format automatically for modernc/ncruces. |
 | `WithPragma(name, value)` | Set a SQLite PRAGMA on open. Rendered as `_name=value` for mattn, `_pragma=name(value)` for modernc/ncruces. |
 | `OnOpen(fn)` | Hook called with `(path string, db *sql.DB)` just after the database is opened. Errors abort the open. |
@@ -402,28 +403,35 @@ function. If the key for a given user is unavailable, `Read`/`Write` return
 
 `TestDB` and `TestPool` create in-memory / temp-dir instances and panic on
 error, keeping test setup concise. Pass the same options as the production
-constructors, including `WithDriver`:
+constructors:
 
 ```go
-db   := sqlflow.TestDB(querier, sqlflow.WithDriver(sqlflow.MattnDriver), migrators.Goose(fsys))
-pool := sqlflow.TestPool(t.TempDir(), querier, sqlflow.WithDriver(sqlflow.MattnDriver), migrators.Goose(fsys))
+db   := sqlflow.TestDB(querier, mattn.Driver, migrators.Goose(fsys))
+pool := sqlflow.TestPool(t.TempDir(), querier, mattn.Driver, migrators.Goose(fsys))
 ```
 
-In test files, it is common to define a package-level `testDriver` variable
-selected by a build tag so that the same test suite runs against all three
-drivers:
+To run the same test suite against all three drivers, define a `testDriver`
+variable in build-tag files — one per driver. The driver sub-packages make
+this concise:
 
 ```go
 // testdriver_mattn_test.go
 //go:build !modernc && !ncruces
 package mypackage_test
 
-import (
-    "github.com/avalonbits/sqlflow"
-    _ "github.com/mattn/go-sqlite3"
-)
+import "github.com/avalonbits/sqlflow/drivers/mattn"
 
-var testDriver = sqlflow.MattnDriver
+var testDriver = mattn.Driver
+```
+
+```go
+// testdriver_modernc_test.go
+//go:build modernc
+package mypackage_test
+
+import "github.com/avalonbits/sqlflow/drivers/modernc"
+
+var testDriver = modernc.Driver
 ```
 
 ```sh

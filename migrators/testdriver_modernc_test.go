@@ -2,10 +2,6 @@
 
 package migrators_test
 
-import (
-	"github.com/avalonbits/sqlflow"
+import "github.com/avalonbits/sqlflow/drivers/modernc"
 
-	_ "modernc.org/sqlite"
-)
-
-var testDriver = sqlflow.ModerncDriver
+var testDriver = modernc.Driver
