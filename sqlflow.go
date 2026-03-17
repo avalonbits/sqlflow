@@ -31,6 +31,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,7 +110,7 @@ type DB[Queries any, D DBTX] struct {
 //
 // Panics on any error so test setup stays concise.
 func TestDB[Queries any, D DBTX](querier Querier[Queries, D], opts ...Option) *DB[Queries, D] {
-	conn, err := sql.Open("sqlite3", fmt.Sprintf(writeDSN, ":memory:"))
+	conn, err := sql.Open("sqlite3", buildDSN(":memory:", "immediate", collectDSNParams(opts)))
 	if err != nil {
 		panic(err)
 	}
@@ -145,11 +147,12 @@ func OpenEncryptedDB[Queries any, D DBTX](dbName string, querier Querier[Queries
 	return openDB(dbName, querier, key, opts)
 }
 
-// Option carries a single lifecycle hook for a DB instance. Construct one
-// with OnOpen or OnClose; passing no options is always valid.
+// Option carries configuration for a DB or Pool instance. Construct one with
+// OnOpen, OnClose, or WithDSNParams; passing no options is always valid.
 type Option struct {
-	onOpen  func(path string, db *sql.DB) error
-	onClose func(path string, db *sql.DB)
+	onOpen    func(path string, db *sql.DB) error
+	onClose   func(path string, db *sql.DB)
+	dsnParams string
 }
 
 // OnOpen registers fn to be called with the database file path and the live
@@ -170,6 +173,19 @@ func OnOpen(fn func(path string, db *sql.DB) error) Option {
 // to release resources tied to this DB's lifetime (e.g. lock files).
 func OnClose(fn func(path string, db *sql.DB)) Option {
 	return Option{onClose: fn}
+}
+
+// WithDSNParams adds extra SQLite DSN parameters to every connection opened by
+// this DB or Pool. The _txlock and _journal parameters are always controlled
+// by sqlflow and cannot be overridden. All other parameters — including _sync,
+// _busy_timeout, and _cache_size — take the value from the last WithDSNParams
+// option that sets them, overriding sqlflow's defaults. The _key and _cipher
+// parameters are silently ignored; use OpenEncryptedDB or NewEncryptedPool for
+// encrypted databases.
+//
+// params is a URL query string, e.g. "_foreign_keys=1&_cache_size=50000".
+func WithDSNParams(params string) Option {
+	return Option{dsnParams: params}
 }
 
 // Close calls the OnClose hook (if any) exactly once, then closes both the
@@ -493,14 +509,15 @@ func newPool[Queries any, D DBTX](
 }
 
 func openDBConns[Queries any, D DBTX](dbName string, querier Querier[Queries, D], key []byte, opts []Option) (*DB[Queries, D], error) {
-	var rDSN, wDSN string
+	userParams := collectDSNParams(opts)
 
+	var wDSN, rDSN string
 	if len(key) > 0 {
-		wDSN = cipherWriteDSNFor(dbName, key)
-		rDSN = cipherReadDSNFor(dbName, key)
+		wDSN = buildCipherDSN(dbName, "immediate", key, userParams)
+		rDSN = buildCipherDSN(dbName, "deferred", key, userParams)
 	} else {
-		wDSN = fmt.Sprintf(writeDSN, dbName)
-		rDSN = fmt.Sprintf(readDSN, dbName)
+		wDSN = buildDSN(dbName, "immediate", userParams)
+		rDSN = buildDSN(dbName, "deferred", userParams)
 	}
 
 	wrdb, err := sql.Open("sqlite3", wDSN)
@@ -695,21 +712,80 @@ func newPoolCache[Queries any, D DBTX](maxCached int64) (*ristretto.Cache[string
 	})
 }
 
-const (
-	readDSN  = "%s?_journal=wal&_sync=1&_busy_timeout=5000&_cache_size=10000&_txlock=deferred"
-	writeDSN = "%s?_journal=wal&_sync=1&_busy_timeout=5000&_cache_size=10000&_txlock=immediate"
-)
+// collectDSNParams merges all dsnParams strings from opts into a url.Values.
+// When the same key appears in multiple WithDSNParams options, the last value
+// wins, mirroring how later options take precedence over earlier ones.
+func collectDSNParams(opts []Option) url.Values {
+	merged := url.Values{}
 
-// cipherWriteDSNFor builds a DSN that applies PRAGMA key via the jgiannuzzi
-// fork's native _key parameter. The fork executes PRAGMA key before any
-// file-accessing pragmas (busy_timeout, synchronous, journal_mode), so WAL and
-// synchronous settings work correctly on existing encrypted databases.
-func cipherWriteDSNFor(path string, key []byte) string {
-	return path + "?_key=x%27" + hex.EncodeToString(key) + "%27&_cipher=sqlcipher&_journal=wal&_sync=1&_busy_timeout=5000&_cache_size=10000&_txlock=immediate"
+	for _, opt := range opts {
+		if opt.dsnParams == "" {
+			continue
+		}
+
+		params, _ := url.ParseQuery(opt.dsnParams)
+		maps.Copy(merged, params)
+	}
+
+	return merged
 }
 
-func cipherReadDSNFor(path string, key []byte) string {
-	return path + "?_key=x%27" + hex.EncodeToString(key) + "%27&_cipher=sqlcipher&_journal=wal&_sync=1&_busy_timeout=5000&_cache_size=10000&_txlock=deferred"
+// buildDSN assembles a plain SQLite DSN for path. txlock must be "deferred"
+// (read connections) or "immediate" (the write connection). userParams provides
+// caller-supplied overrides for tunable parameters; _txlock and _journal are
+// always set by sqlflow and cannot be overridden.
+func buildDSN(path, txlock string, userParams url.Values) string {
+	merged := make(url.Values, len(userParams)+5)
+	maps.Copy(merged, userParams)
+
+	// Strip params that have special handling elsewhere (encrypted-only).
+	delete(merged, "_key")
+	delete(merged, "_cipher")
+
+	// Apply sqlflow defaults for tuning params the caller did not set.
+	if merged.Get("_sync") == "" {
+		merged.Set("_sync", "1")
+	}
+	if merged.Get("_busy_timeout") == "" {
+		merged.Set("_busy_timeout", "5000")
+	}
+	if merged.Get("_cache_size") == "" {
+		merged.Set("_cache_size", "10000")
+	}
+
+	// Lock correctness-critical params — these always win.
+	merged.Set("_journal", "wal")
+	merged.Set("_txlock", txlock)
+
+	return path + "?" + merged.Encode()
+}
+
+// buildCipherDSN assembles an encrypted SQLite DSN. It behaves like buildDSN
+// but also injects the SQLCipher _key and _cipher parameters, which the
+// jgiannuzzi fork applies before any file-accessing pragmas so that WAL mode
+// and synchronous settings work correctly on existing encrypted databases.
+func buildCipherDSN(path, txlock string, key []byte, userParams url.Values) string {
+	merged := make(url.Values, len(userParams)+6)
+	maps.Copy(merged, userParams)
+
+	// Apply sqlflow defaults for tuning params the caller did not set.
+	if merged.Get("_sync") == "" {
+		merged.Set("_sync", "1")
+	}
+	if merged.Get("_busy_timeout") == "" {
+		merged.Set("_busy_timeout", "5000")
+	}
+	if merged.Get("_cache_size") == "" {
+		merged.Set("_cache_size", "10000")
+	}
+
+	// Lock correctness-critical and cipher params — these always win.
+	merged.Set("_journal", "wal")
+	merged.Set("_txlock", txlock)
+	merged.Set("_cipher", "sqlcipher")
+	merged.Set("_key", "x'"+hex.EncodeToString(key)+"'")
+
+	return path + "?" + merged.Encode()
 }
 
 func (db *DB[Queries, D]) transaction(ctx context.Context, rdbms *sql.DB, f func(*Queries) error) error {

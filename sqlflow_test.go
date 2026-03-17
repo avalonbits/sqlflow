@@ -1281,3 +1281,132 @@ func TestPool_Close_DrainsInFlight(t *testing.T) {
 		t.Errorf("Close: %v", closeErr)
 	}
 }
+
+// --- Section 18: WithDSNParams ---
+
+// TestWithDSNParams_UserParam verifies that a user-supplied DSN parameter
+// (here _foreign_keys) is forwarded to the connection and takes effect.
+func TestWithDSNParams_UserParam(t *testing.T) {
+	t.Parallel()
+
+	for _, dc := range dbCases() {
+		t.Run(dc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var gotFK int
+
+			db, err := openDB(
+				filepath.Join(t.TempDir(), "test.db"),
+				dc.key,
+				gooseOpt(),
+				sqlflow.WithDSNParams("_foreign_keys=1"),
+				sqlflow.OnOpen(func(_ string, conn *sql.DB) error {
+					return conn.QueryRow("PRAGMA foreign_keys").Scan(&gotFK)
+				}),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+
+			if gotFK != 1 {
+				t.Errorf("foreign_keys pragma: got %d, want 1", gotFK)
+			}
+		})
+	}
+}
+
+// TestWithDSNParams_LockedParams verifies that attempting to override _journal
+// and _txlock via WithDSNParams has no effect — sqlflow always wins.
+func TestWithDSNParams_LockedParams(t *testing.T) {
+	t.Parallel()
+
+	for _, dc := range dbCases() {
+		t.Run(dc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var gotJournal string
+
+			db, err := openDB(
+				filepath.Join(t.TempDir(), "test.db"),
+				dc.key,
+				gooseOpt(),
+				sqlflow.WithDSNParams("_journal=delete&_txlock=deferred"),
+				sqlflow.OnOpen(func(_ string, conn *sql.DB) error {
+					return conn.QueryRow("PRAGMA journal_mode").Scan(&gotJournal)
+				}),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+
+			if gotJournal != "wal" {
+				t.Errorf("journal_mode: got %q, want %q", gotJournal, "wal")
+			}
+		})
+	}
+}
+
+// TestWithDSNParams_OverrideDefault verifies that user-supplied values for
+// tunable params (_cache_size, _busy_timeout, _sync) override sqlflow's
+// defaults.
+func TestWithDSNParams_OverrideDefault(t *testing.T) {
+	t.Parallel()
+
+	for _, dc := range dbCases() {
+		t.Run(dc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var gotCacheSize int
+
+			db, err := openDB(
+				filepath.Join(t.TempDir(), "test.db"),
+				dc.key,
+				gooseOpt(),
+				sqlflow.WithDSNParams("_cache_size=9999"),
+				sqlflow.OnOpen(func(_ string, conn *sql.DB) error {
+					return conn.QueryRow("PRAGMA cache_size").Scan(&gotCacheSize)
+				}),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+
+			if gotCacheSize != 9999 {
+				t.Errorf("cache_size pragma: got %d, want 9999", gotCacheSize)
+			}
+		})
+	}
+}
+
+// TestWithDSNParams_Pool verifies that WithDSNParams is forwarded to every
+// database opened by a Pool.
+func TestWithDSNParams_Pool(t *testing.T) {
+	t.Parallel()
+
+	var gotFK int
+
+	p := sqlflow.TestPool(
+		t.TempDir(),
+		newQuerier(),
+		gooseOpt(),
+		sqlflow.WithDSNParams("_foreign_keys=1"),
+		sqlflow.OnOpen(func(_ string, conn *sql.DB) error {
+			return conn.QueryRow("PRAGMA foreign_keys").Scan(&gotFK)
+		}),
+	)
+	defer p.Close()
+
+	ctx := context.Background()
+	if err := p.Write(ctx, "alice", func(q *kvQuerier) error {
+		return q.Set(ctx, "k", "v")
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if gotFK != 1 {
+		t.Errorf("foreign_keys pragma: got %d, want 1", gotFK)
+	}
+}
