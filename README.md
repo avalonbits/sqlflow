@@ -376,11 +376,59 @@ accept a variadic `...Option` that configures the database:
 | Option | Description |
 |--------|-------------|
 | `mattn.Driver` / `modernc.Driver` / `ncruces.Driver` | Select the SQLite driver (from the `drivers/` sub-packages). Defaults to mattn if omitted. |
-| `WithDSNParams(params)` | Append extra DSN parameters (URL query string). Locked params (`_txlock`, `_journal`) are ignored; overridable defaults (`_sync`, `_busy_timeout`, `_cache_size`) can be replaced. Underscore-prefixed params are translated to `_pragma=name(value)` format automatically for modernc/ncruces. |
-| `WithPragma(name, value)` | Set a SQLite PRAGMA on open. Rendered as `_name=value` for mattn, `_pragma=name(value)` for modernc/ncruces. |
+| `WithDSNParams(params)` | Pass connection parameters using the mattn DSN query-string syntax. |
+| `WithPragma(name, value)` | Set a SQLite PRAGMA on open, cross-driver. |
 | `OnOpen(fn)` | Hook called with `(path string, db *sql.DB)` just after the database is opened. Errors abort the open. |
 | `OnClose(fn)` | Hook called with `(path string, db *sql.DB)` just before the database is closed. |
 | `migrators.Goose(fsys)` | Convenience `OnOpen` hook that runs goose migrations from `fsys`. |
+
+### Connection parameters
+
+> [!NOTE]
+> Pass the file path directly to `OpenDB` — not a DSN URI. sqlflow builds the
+> connection string internally. Passing `"file:/path/db?..."` or any path
+> containing `?` returns an error.
+
+Use `WithDSNParams` to pass connection parameters using the familiar mattn
+query-string syntax. sqlflow translates them to the correct format for the
+active driver automatically:
+
+```go
+db, err := sqlflow.OpenDB(
+    "/var/data/app.db",
+    querier,
+    mattn.Driver,
+    sqlflow.WithDSNParams("_foreign_keys=1&_cache_size=20000"),
+)
+```
+
+For a single pragma, `WithPragma` is more explicit and works identically across
+all three drivers:
+
+```go
+sqlflow.WithPragma("foreign_keys", "1")
+sqlflow.WithPragma("cache_size", "20000")
+```
+
+**What sqlflow controls and you cannot override:**
+
+| Parameter | Value | Reason |
+|-----------|-------|--------|
+| `_txlock` / `_pragma=locking_mode` | `immediate` (write), `deferred` (read) | Required for WAL correctness |
+| `_journal` / `journal_mode` | `WAL` | Core guarantee of the library |
+
+**Defaults you can override:**
+
+| Parameter | Default | Override example |
+|-----------|---------|-----------------|
+| `_sync` / `synchronous` | `NORMAL` (1) | `WithDSNParams("_sync=2")` |
+| `_busy_timeout` / `busy_timeout` | 5000 ms | `WithDSNParams("_busy_timeout=10000")` |
+| `_cache_size` / `cache_size` | 10000 pages | `WithDSNParams("_cache_size=50000")` |
+
+Any other `_`-prefixed parameter (e.g. `_foreign_keys`, `_auto_vacuum`) is
+forwarded to the driver. For mattn it is passed as a flat query param; for
+modernc and ncruces it is translated to `_pragma=name(value)` automatically,
+so the same `WithDSNParams` call works across all drivers.
 
 ### Single database — `DB[Q]`
 
