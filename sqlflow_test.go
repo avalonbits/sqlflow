@@ -203,6 +203,27 @@ func TestGetDB_BadPath(t *testing.T) {
 	}
 }
 
+func TestOpenDB_DSNPathRejected(t *testing.T) {
+	t.Parallel()
+
+	cases := []string{
+		"file:/tmp/myapp.db",
+		"file:myapp.db?_journal=wal",
+		"/tmp/myapp.db?_foreign_keys=1",
+	}
+
+	for _, path := range cases {
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := sqlflow.OpenDB(path, newQuerier(), testDriver)
+			if err == nil {
+				t.Fatalf("expected error for DSN path %q, got nil", path)
+			}
+		})
+	}
+}
+
 // --- Section 4: OpenEncryptedDB ---
 
 func TestOpenEncryptedDB_WrongKey(t *testing.T) {

@@ -652,6 +652,14 @@ func collectDriver(opts []Option) DriverConfig {
 }
 
 func openDB[Queries any, D DBTX](dbName string, querier Querier[Queries, D], key []byte, opts []Option) (*DB[Queries, D], error) {
+	if strings.HasPrefix(dbName, "file:") || strings.Contains(dbName, "?") {
+		return nil, fmt.Errorf(
+			"path %q looks like a DSN URI; pass the file path directly and use "+
+				"WithDSNParams or WithPragma to set connection parameters",
+			dbName,
+		)
+	}
+
 	if err := os.MkdirAll(filepath.Dir(dbName), 0o755); err != nil {
 		return nil, fmt.Errorf("creating db dir: %w", err)
 	}
