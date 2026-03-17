@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install goimports
+        run: go install golang.org/x/tools/cmd/goimports@latest
+
+      - name: Check goimports
+        run: |
+          goimports -w .
+          git diff --exit-code
+
+      - name: Check go fix
+        run: |
+          go fix ./...
+          git diff --exit-code
+
+  test:
+    name: Test (${{ matrix.driver }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - driver: mattn
+            test-flags: ""
+          - driver: modernc
+            test-flags: "-tags modernc"
+          - driver: ncruces
+            test-flags: "-tags ncruces"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: go test ./... -race ${{ matrix.test-flags }}
