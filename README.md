@@ -248,6 +248,83 @@ db, err := sqlflow.OpenEncryptedDB(
 Calling `OpenEncryptedDB` or `NewEncryptedPool` with `modernc.Driver` or `ncruces.Driver` returns
 `sqlflow.ErrEncryptionNotSupported` immediately.
 
+## Using with sqlc
+
+[sqlc](https://sqlc.dev/) generates type-safe Go query functions from SQL. It's a natural fit for
+sqlflow: sqlc produces a `New(db DBTX) *Queries` constructor and a `DBTX` interface that sqlflow
+accepts directly, so there is no adapter code to write.
+
+### Configure sqlc
+
+A minimal `sqlc.yaml` for a SQLite project:
+
+```yaml
+version: "2"
+sql:
+  - engine: "sqlite"
+    queries: "queries.sql"
+    schema:  "migrations/"
+    gen:
+      go:
+        package:     "store"
+        out:         "store"
+        sql_package: "database/sql"
+```
+
+> [!NOTE]
+> Set `sql_package: "database/sql"` so sqlc generates a `DBTX` interface backed by the standard
+> library — this is what sqlflow's `DBTX` is compatible with.
+
+### Write your queries
+
+```sql
+-- queries.sql
+
+-- name: GetUser :one
+SELECT id, name FROM users WHERE id = ?;
+
+-- name: CreateUser :exec
+INSERT INTO users (id, name) VALUES (?, ?);
+```
+
+Run `sqlc generate` after editing `.sql` files to keep the generated code in sync.
+
+### Wire it to sqlflow
+
+Pass the generated `store.New` function directly as the `Querier` — sqlflow infers all type
+parameters from it:
+
+```go
+import (
+    "github.com/avalonbits/sqlflow"
+    "github.com/avalonbits/sqlflow/drivers/mattn"
+    "github.com/avalonbits/sqlflow/migrators"
+    "myapp/store"
+)
+
+db, err := sqlflow.OpenDB(
+    "/var/data/app.db",
+    store.New,                   // sqlc-generated constructor, no wrapper needed
+    mattn.Driver,
+    migrators.Goose(migrationsFS),
+)
+```
+
+`db` is a `*sqlflow.DB[store.Queries, store.DBTX]`. Inside `Read` and `Write` closures the
+`*store.Queries` accessor gives you fully type-safe calls:
+
+```go
+err = db.Write(ctx, func(q *store.Queries) error {
+    return q.CreateUser(ctx, store.CreateUserParams{ID: 1, Name: "Alice"})
+})
+
+err = db.Read(ctx, func(q *store.Queries) error {
+    user, err := q.GetUser(ctx, 1)
+    fmt.Println(user.Name) // Alice
+    return err
+})
+```
+
 ## Concepts
 
 ### Read and Write
