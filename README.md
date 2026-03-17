@@ -153,8 +153,10 @@ func (s *kvStore) Get(ctx context.Context, key string) (string, error) {
 In the typical case where you are working with a single database file, calling `sqlflow.OpenDB` with the
 path and Querier factory is analogous to `sql.Open(...)` with an extra factory function.
 
-Pass the plain file path — not a DSN URI. Paths containing `file:` or `?` are rejected with an error.
-Use `WithDSNParams` or `WithPragma` to set connection parameters (see [Connection parameters](#connection-parameters)).
+> [!NOTE]
+> Pass the plain file path — not a DSN URI. Paths containing `file:` or `?` are rejected with an
+> error. Use `WithDSNParams` or `WithPragma` to set connection parameters
+> (see [Connection parameters](#connection-parameters)).
 
 `sqlflow.DB` is generic over your Querier type — `DB[kvStore]` in this example — which is why the
 closure passed to `Read` and `Write` receives a concrete `*kvStore` rather than an interface. The
